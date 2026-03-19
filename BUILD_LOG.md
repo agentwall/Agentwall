@@ -887,4 +887,205 @@ and the previous working rules remain active.
 | v0.2 | All tool calls inside OpenClaw | Native OpenClaw plugin (`before_tool_call` hook) |
 | v0.3 | Everything MCP-speaking | Protocol-level MCP proxy |
 | v0.4 | Same + database rules | Policy engine v2 + zero-friction setup |
-| v0.5 | **Same + rate limiting** | **Hot-reload + rate limiting** |
+| v0.5 | Same + rate limiting | Hot-reload + rate limiting |
+| v0.6 | **Same + web UI** | **Approval UI, policy editor, log viewer** |
+
+---
+
+## v0.6.0 — Web UI + Unified Approval (2026-03-19)
+
+### What Changed
+
+v0.6 ships the web UI (approval page, policy editor, log viewer) and unifies
+all approval requests to flow through the browser at `http://localhost:7823`.
+Previously, OpenClaw used terminal prompts and GUI MCP clients (Cursor, Claude
+Desktop) could not prompt at all (no TTY → auto-deny). Now all runtimes route
+through one web UI.
+
+### Problems Solved
+
+**Terminal-only prompts in headless environments.** GUI clients like Cursor and
+Claude Desktop spawn MCP servers without a TTY. Before v0.6, `askUser()` checked
+`inputMode === "tty" && !isTtyAvailable() && _webApprovalQueue` — a triple
+condition that only routed to the web queue when explicitly in TTY mode with no
+TTY available. This was too restrictive.
+
+**OpenClaw dual-process architecture.** OpenClaw loads plugins in both the main
+process and the gateway subprocess. Both called `setWebApprovalQueue()`, but only
+one could bind port 7823. The second process's `ApprovalQueue` had no web server
+connected — approval requests sat unanswered for 30 seconds and auto-denied.
+
+**EADDRINUSE crashes.** When two runtimes (e.g., OpenClaw + Claude Desktop) ran
+simultaneously, the second to start would crash trying to bind the same port.
+Node.js `http.Server` error events weren't being caught in OpenClaw's plugin
+environment (OpenClaw ignores async `activate()` return values and has its own
+`process.on('uncaughtException')` handler).
+
+**No real-time log broadcast for OpenClaw.** OpenClaw's hook (`src/hook.js`) used
+its own `logDecision()` function writing to `~/.agentwall/decisions.jsonl`, not
+the core `EventLogger`. Decisions were never broadcast via WebSocket, so the web
+UI log viewer only showed MCP proxy entries.
+
+**Generic "mcp" runtime label.** All MCP proxy entries showed as `runtime: "mcp"`
+regardless of whether Claude Desktop, Cursor, or Windsurf was the client.
+
+### Architecture
+
+```
+OpenClaw gateway (main process)
+  └─ AgentWall plugin (index.js)
+       ├─ ApprovalQueue + AgentWallWebServer on :7823
+       ├─ EventLogger with onEntry → WebSocket broadcast
+       └─ before_tool_call handler → askUser → web queue
+
+OpenClaw gateway (subprocess)
+  └─ AgentWall plugin (index.js)
+       ├─ Port check: 7823 in use → remote proxy mode
+       ├─ HTTP POST to /api/request-approval on :7823
+       └─ before_tool_call handler → askUser → remote queue
+
+Claude Desktop / Cursor / Windsurf (MCP proxy)
+  └─ agentwall proxy -- <real server>
+       ├─ Port check: 7823 free → start web server
+       ├─ Port check: 7823 in use → remote proxy mode
+       ├─ Client detection via MCP handshake → runtime label
+       └─ tools/call handler → askUser → web/remote queue
+
+Browser (http://localhost:7823)
+  ├─ / (Approval)    ← pending approval requests
+  ├─ /policy         ← YAML policy editor
+  └─ /log            ← searchable audit log
+```
+
+### Fixes Applied
+
+**Fix 1 — `src/core/prompt.ts`**
+
+Removed TTY gating from `askUser()`. Changed:
+```
+if (inputMode === "tty" && !isTtyAvailable() && _webApprovalQueue)
+```
+to:
+```
+if (_webApprovalQueue)
+```
+If a web approval queue is registered, always use it. Terminal prompt path
+preserved as fallback for `agentwall start` CLI mode (v0.1 flow).
+
+**Fix 2 — `src/web/server.ts`**
+
+- Added permanent `error` handler on `http.Server` in constructor to prevent
+  uncaught exceptions in environments with global error handlers (OpenClaw).
+- Added `once("error", onError)` in `start()` to surface errors as rejected
+  promises.
+- Added `POST /api/request-approval` endpoint — long-polling HTTP endpoint that
+  accepts a remote approval request, adds it to the local `ApprovalQueue`, and
+  blocks until the user responds in the browser. Returns `{ decision: "allow" | "deny" }`.
+- Added static routes for `/logo.png` and `/favicon.ico`.
+
+**Fix 3 — `src/adapters/mcp/proxy.ts`**
+
+- Removed `checkTtyAvailable()` and all `!hasTty` gates. Always creates
+  `ApprovalQueue` and wires `EventLogger` with `onEntry`.
+- Added `isPortReachable()` — TCP socket probe to check if port 7823 is already
+  bound before attempting `server.listen()`.
+- When port is free: starts web server locally.
+- When port is in use: creates a remote proxy queue that forwards approval
+  requests via `HTTP POST` to the existing web server's `/api/request-approval`.
+- Added `remoteApprovalRequest()` — sends `{ toolName, params, runtime }` via
+  HTTP and blocks until the response arrives (35-second timeout, safe fallback
+  to deny).
+- Added MCP client identity detection via `server.getClientVersion()?.name`
+  after the MCP handshake. Maps known client names to runtime labels:
+  `claude-desktop`, `cursor`, `windsurf`, `claude-code`. Unknown clients log
+  their name to stderr and fall back to `mcp`.
+
+**Fix 4 — `index.js` (OpenClaw plugin)**
+
+- Added imports for `ApprovalQueue`, `setWebApprovalQueue`, `AgentWallWebServer`,
+  `EventLogger`, `PolicyEngine` from compiled `dist/`.
+- `activate()` is synchronous (OpenClaw ignores async return values).
+- Added `isPortReachable()` check before web server startup:
+  - Port free: creates local `ApprovalQueue` + starts `AgentWallWebServer`.
+  - Port in use: creates remote proxy queue via `remoteApprovalRequest()`.
+- Web server startup uses `.then()/.catch()` chains instead of `async/await`
+  to prevent unhandled promise rejections in OpenClaw's dual-process environment.
+- Passes `EventLogger` instance to hook handler via `{ eventLogger }` option.
+
+**Fix 5 — `src/hook.js` (OpenClaw handler)**
+
+- `createBeforeToolCallHandler` now accepts `options = {}` with `eventLogger`.
+- Added `toolName` and `args` to proposal object (previously missing — web
+  approval UI could not display tool call parameters).
+- Added `buildLogEntry()` helper that constructs `LogEntry` objects matching
+  the core schema (`ts`, `runtime`, `decision`, `resolvedBy`, `command`,
+  `workingDir`, `approvalId`, `sessionId`, `agentId`).
+- Added `eventLogger.log()` calls at every decision point (policy block,
+  auto-allow, prompt error, user approve/deny) so OpenClaw decisions broadcast
+  via WebSocket and appear in the web UI log viewer in real time.
+
+**Fix 6 — `src/core/types.ts`**
+
+Extended `Runtime` union type: added `"windsurf"` and `"claude-desktop"` to
+support the new client detection.
+
+### UI Changes
+
+- Added AgentWall shield logo to the nav bar (32x32) and as favicon on all
+  three pages (Approval, Policy Editor, Log Viewer).
+- Nav brand font size increased to 1.25rem, nav links to 1rem.
+
+### Modified Files
+
+| File | Change |
+|---|---|
+| `src/core/prompt.ts` | Removed TTY gating from `askUser()` |
+| `src/core/types.ts` | Added `windsurf`, `claude-desktop` to `Runtime` union |
+| `src/web/server.ts` | Added error handling in constructor/start, `/api/request-approval` endpoint, `/logo.png` + `/favicon.ico` routes |
+| `src/adapters/mcp/proxy.ts` | Removed TTY gates, added port check, remote approval proxy, client identity detection |
+| `index.js` | Full rewrite — web server startup, port check, remote approval proxy, EventLogger wiring |
+| `src/hook.js` | Added eventLogger option, toolName/args on proposal, EventLogger.log at every decision |
+| `src/web/ui/index.html` | Added favicon link, logo in nav, increased font sizes |
+| `src/web/ui/log.html` | Added favicon link, logo in nav, increased font sizes |
+| `src/web/ui/policy.html` | Added favicon link, logo in nav, increased font sizes |
+| `src/web/ui/logo.png` | New — AgentWall shield logo |
+
+### Key Design Decisions
+
+**Port probing over EADDRINUSE.** Initial approach was to catch EADDRINUSE from
+`server.listen()`. This failed in OpenClaw's environment because: (1) OpenClaw
+ignores async plugin activation, turning rejections into uncaught exceptions;
+(2) OpenClaw has its own `process.on('uncaughtException')` that fires even when
+EventEmitter error handlers are registered. Solution: probe the port with a TCP
+socket connection before attempting to listen. No EADDRINUSE can occur.
+
+**Remote approval via HTTP long-poll.** When the web server port is already in
+use by another runtime, the second runtime creates a lightweight proxy that sends
+approval requests via `POST /api/request-approval`. The endpoint blocks until the
+user responds in the browser, then returns the decision. 35-second HTTP timeout
+(slightly longer than the 30-second approval timeout) ensures safe fallback to
+deny.
+
+**Synchronous activate() with promise chains.** OpenClaw ignores the return value
+of `activate()` and logs a warning if it returns a promise (`plugin register
+returned a promise; async registration is ignored`). All async work (port check,
+web server startup) is done via `.then()/.catch()` chains that handle errors
+internally. The `before_tool_call` handler is registered synchronously before
+any async work completes.
+
+**Client detection from MCP handshake.** The MCP SDK's `Server.getClientVersion()`
+returns the client's self-reported name after initialization. Patterns are matched
+case-insensitively with specific matches checked before generic ones (`"claude
+desktop"` before `"claude"`). Unknown clients log their name to stderr for
+debugging and fall back to `"mcp"`.
+
+### Version History
+
+| Version | What gets intercepted | How |
+|---|---|---|
+| v0.1 | `exec` — shell commands only | OpenClaw WebSocket event adapter |
+| v0.2 | All tool calls inside OpenClaw | Native OpenClaw plugin (`before_tool_call` hook) |
+| v0.3 | Everything MCP-speaking | Protocol-level MCP proxy |
+| v0.4 | Same + database rules | Policy engine v2 + zero-friction setup |
+| v0.5 | Same + rate limiting | Hot-reload + rate limiting |
+| v0.6 | **Same + web UI** | **Unified web approval, policy editor, log viewer** |
