@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import * as net from "node:net";
+import * as http from "node:http";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -29,9 +31,82 @@ import type {
   DecisionReason,
   LogEntry,
   McpProxyOptions,
+  Runtime,
 } from "../../core/types.js";
 
 const VERSION = "0.6.0";
+
+const CLIENT_NAME_TO_RUNTIME: [string, Runtime][] = [
+  ["claude desktop", "claude-desktop"],
+  ["claude-desktop", "claude-desktop"],
+  ["claude-ai", "claude-desktop"],
+  ["anthropic", "claude-desktop"],
+  ["cursor", "cursor"],
+  ["windsurf", "windsurf"],
+  ["codeium", "windsurf"],
+  ["claude code", "claude-code"],
+  ["claude-code", "claude-code"],
+  ["claudecode", "claude-code"],
+  ["claude", "claude-desktop"],
+];
+
+function detectRuntime(clientName?: string): Runtime {
+  if (!clientName) return "mcp";
+  const lower = clientName.toLowerCase();
+  for (const [pattern, runtime] of CLIENT_NAME_TO_RUNTIME) {
+    if (lower.includes(pattern)) return runtime;
+  }
+  process.stderr.write(`[AgentWall] Unknown MCP client: "${clientName}" — showing as "mcp"\n`);
+  return "mcp";
+}
+
+function isPortReachable(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = new net.Socket();
+    socket.setTimeout(1000);
+    socket.once("connect", () => { socket.destroy(); resolve(true); });
+    socket.once("error", () => { socket.destroy(); resolve(false); });
+    socket.once("timeout", () => { socket.destroy(); resolve(false); });
+    socket.connect(port, "127.0.0.1");
+  });
+}
+
+function remoteApprovalRequest(
+  port: number,
+  toolName: string,
+  params: Record<string, unknown>,
+  runtime: string,
+): Promise<"allow" | "deny"> {
+  return new Promise((resolve) => {
+    const data = JSON.stringify({ toolName, params, runtime });
+    const req = http.request({
+      hostname: "127.0.0.1",
+      port,
+      path: "/api/request-approval",
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(data),
+      },
+      timeout: 35000,
+    }, (res) => {
+      let body = "";
+      res.on("data", (chunk: string) => body += chunk);
+      res.on("end", () => {
+        try {
+          const result = JSON.parse(body);
+          resolve(result.decision === "allow" ? "allow" : "deny");
+        } catch {
+          resolve("deny");
+        }
+      });
+    });
+    req.on("error", () => resolve("deny"));
+    req.on("timeout", () => { req.destroy(); resolve("deny"); });
+    req.write(data);
+    req.end();
+  });
+}
 
 const GREEN = "\x1b[32m";
 const RED = "\x1b[31m";
@@ -99,23 +174,25 @@ export async function startProxy(options: McpProxyOptions): Promise<void> {
 
   const envPort = parseInt(process.env.AGENTWALL_PORT ?? "", 10) || 7823;
   const port = options.port ?? envPort;
-  webServer = new AgentWallWebServer({
-    port,
-    policyPath: policy.policyPath,
-    logDir: logger.logDir,
-    approvalQueue,
-  });
+  const portInUse = await isPortReachable(port);
 
-  try {
+  if (portInUse) {
+    process.stderr.write(`[AgentWall] Web UI already running at http://localhost:${port}\n`);
+    const remoteQueue = {
+      request: (toolName: string, params: Record<string, unknown>, runtime: string) =>
+        remoteApprovalRequest(port, toolName, params, runtime),
+    } as ApprovalQueue;
+    setWebApprovalQueue(remoteQueue);
+  } else {
+    webServer = new AgentWallWebServer({
+      port,
+      policyPath: policy.policyPath,
+      logDir: logger.logDir,
+      approvalQueue,
+    });
     await webServer.start();
     process.stderr.write(`[AgentWall] Web UI available at http://localhost:${port}\n`);
     process.stderr.write(`[AgentWall] Approval requests will appear in your browser.\n`);
-  } catch (err: any) {
-    if (err.code === "EADDRINUSE") {
-      process.stderr.write(`[AgentWall] Web UI already running at http://localhost:${port}\n`);
-    } else {
-      throw err;
-    }
   }
 
   process.stderr.write(
@@ -201,9 +278,12 @@ export async function startProxy(options: McpProxyOptions): Promise<void> {
     const command = extractCommand(toolName, toolArgs);
     const workingDir = extractPath(toolArgs);
 
+    const clientName = server.getClientVersion()?.name;
+    const runtime = detectRuntime(clientName);
+
     const proposal: ActionProposal = {
       approvalId: randomUUID(),
-      runtime: "mcp",
+      runtime,
       command,
       workingDir,
       toolName: toolName,
@@ -320,8 +400,13 @@ export async function startProxy(options: McpProxyOptions): Promise<void> {
   const clientFacingTransport = new StdioServerTransport();
   await server.connect(clientFacingTransport);
 
+  const detectedClient = server.getClientVersion()?.name ?? "unknown";
+  const detectedRuntime = detectRuntime(detectedClient);
   process.stderr.write(
     `  ${GREEN}✓${RESET} Proxy ready — intercepting tool calls\n`,
+  );
+  process.stderr.write(
+    `  ${DIM}client: ${detectedClient} (runtime: ${detectedRuntime})${RESET}\n`,
   );
   process.stderr.write(
     `  ${DIM}log: ${logger.logPath}${RESET}\n\n`,

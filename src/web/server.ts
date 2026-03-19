@@ -140,6 +140,8 @@ export class AgentWallWebServer {
     try {
       if (req.method === "GET" && pathname === "/") {
         this.serveStatic(res, "index.html");
+      } else if (req.method === "GET" && (pathname === "/logo.png" || pathname === "/favicon.ico")) {
+        this.serveStatic(res, "logo.png");
       } else if (req.method === "GET" && pathname === "/policy") {
         this.serveStatic(res, "policy.html");
       } else if (req.method === "GET" && pathname === "/log") {

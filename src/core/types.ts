@@ -10,7 +10,7 @@ export interface ActionProposal {
   agentId?:   string;
 }
 
-export type Runtime = "openclaw" | "claude-code" | "cursor" | "mcp";
+export type Runtime = "openclaw" | "claude-code" | "cursor" | "windsurf" | "claude-desktop" | "mcp";
 
 export type DecisionVerdict = "allow" | "deny" | "ask";
 

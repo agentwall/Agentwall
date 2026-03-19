@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AgentWall — Log Viewer</title>
+<link rel="icon" href="/logo.png" type="image/png">
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -25,11 +26,18 @@
   }
   .nav-brand {
     font-weight: 700;
-    font-size: 1rem;
+    font-size: 1.25rem;
     color: #e1e4e8;
     margin-right: auto;
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
   }
-  .nav a { font-size: 0.875rem; }
+  .nav-logo {
+    width: 32px;
+    height: 32px;
+  }
+  .nav a { font-size: 1rem; }
   .nav-active { color: #e1e4e8; font-weight: 600; }
 
   .status-dot {
@@ -120,7 +128,7 @@
 <body>
 
 <nav class="nav">
-  <span class="nav-brand">AgentWall</span>
+  <span class="nav-brand"><img src="/logo.png" alt="" class="nav-logo">AgentWall</span>
   <a href="/">Approval</a>
   <a href="/policy">Policy</a>
   <a href="/log" class="nav-active">Log</a>
