@@ -1,8 +1,8 @@
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, watch as fsWatch, type FSWatcher } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, resolve, dirname, basename } from "node:path";
 import yaml from "js-yaml";
-import type { ActionProposal, Decision } from "./types.js";
+import type { ActionProposal, Decision, LimitRule } from "./types.js";
 
 const AGENTWALL_DIR = join(homedir(), ".agentwall");
 const POLICY_FILE = join(AGENTWALL_DIR, "policy.yaml");
@@ -20,9 +20,10 @@ interface PolicyConfig {
   deny?: PolicyRule[];
   allow?: PolicyRule[];
   ask?: PolicyRule[];
+  limits?: LimitRule[];
 }
 
-const VALID_TOP_KEYS = new Set(["deny", "allow", "ask"]);
+const VALID_TOP_KEYS = new Set(["deny", "allow", "ask", "limits"]);
 const VALID_RULE_KEYS = new Set(["command", "path", "tool", "match", "url"]);
 
 const DEFAULT_POLICY = `# AgentWall Policy
@@ -108,6 +109,20 @@ ask:
 allow:
   # ── Everything inside your workspace is trusted ───────────────────────────
   - path: workspace/**
+
+# ── Rate limits ─────────────────────────────────────────────────────────────
+# Auto-deny if an agent calls a tool too frequently.
+# Catches runaway loops before they cause damage.
+limits:
+  - tool: exec
+    max: 30
+    window: 60      # max 30 shell commands per minute
+  - tool: write
+    max: 50
+    window: 60      # max 50 file writes per minute
+  - tool: "*"
+    max: 200
+    window: 300     # max 200 total tool calls per 5 minutes
 `;
 
 function escapeRegex(char: string): string {
@@ -221,10 +236,93 @@ function ruleMatches(rule: PolicyRule, proposal: ActionProposal): boolean {
   return conditions.every(Boolean);
 }
 
+// ---------------------------------------------------------------------------
+// Rate limiter — internal, not exported
+// ---------------------------------------------------------------------------
+
+type CallRecord = {
+  toolName: string;
+  timestamp: number;
+};
+
+class RateLimiter {
+  private sessions = new Map<string, CallRecord[]>();
+  private cleanupInterval: NodeJS.Timeout;
+
+  constructor() {
+    this.cleanupInterval = setInterval(() => this.cleanup(), 600_000);
+    this.cleanupInterval.unref();
+  }
+
+  check(
+    toolName: string,
+    sessionKey: string,
+    limits: LimitRule[],
+  ): { limited: false } | { limited: true; retryAfterMs: number; rule: LimitRule } {
+    if (limits.length === 0) return { limited: false };
+
+    const now = Date.now();
+    const history = this.sessions.get(sessionKey) ?? [];
+
+    for (const rule of limits) {
+      if (!globToRegex(rule.tool).test(toolName)) continue;
+
+      const windowMs = rule.window * 1000;
+      const windowStart = now - windowMs;
+
+      const callsInWindow = history.filter(
+        (r) => r.timestamp >= windowStart && globToRegex(rule.tool).test(r.toolName),
+      );
+
+      if (callsInWindow.length >= rule.max) {
+        const oldest = Math.min(...callsInWindow.map((r) => r.timestamp));
+        const retryAfterMs = oldest + windowMs - now;
+        return { limited: true, retryAfterMs: Math.max(0, retryAfterMs), rule };
+      }
+    }
+
+    return { limited: false };
+  }
+
+  record(toolName: string, sessionKey: string, limits: LimitRule[]): void {
+    if (limits.length === 0) return;
+
+    const now = Date.now();
+    if (!this.sessions.has(sessionKey)) {
+      this.sessions.set(sessionKey, []);
+    }
+    const history = this.sessions.get(sessionKey)!;
+    history.push({ toolName, timestamp: now });
+
+    const maxWindowMs = Math.max(...limits.map((l) => l.window)) * 1000;
+    const cutoff = now - maxWindowMs;
+    this.sessions.set(
+      sessionKey,
+      history.filter((r) => r.timestamp >= cutoff),
+    );
+  }
+
+  private cleanup(): void {
+    const cutoff = Date.now() - 3_600_000;
+    for (const [key, history] of this.sessions.entries()) {
+      if (history.length === 0 || history.every((r) => r.timestamp < cutoff)) {
+        this.sessions.delete(key);
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Policy engine
+// ---------------------------------------------------------------------------
+
 export class PolicyEngine {
   readonly policyPath: string;
   readonly usingDefaults: boolean;
   private config: PolicyConfig;
+  private rateLimiter = new RateLimiter();
+  private watcher?: FSWatcher;
+  private dirWatcher?: FSWatcher;
 
   constructor() {
     this.policyPath = POLICY_FILE;
@@ -236,95 +334,99 @@ export class PolicyEngine {
     }
 
     this.usingDefaults = false;
-    const raw = readFileSync(POLICY_FILE, "utf-8");
+    try {
+      this.config = this.load();
+    } catch (err) {
+      process.stderr.write(
+        `\x1b[31merror:\x1b[0m ${(err as Error).message}\n`,
+      );
+      process.exit(1);
+    }
+  }
+
+  private load(): PolicyConfig {
+    const raw = readFileSync(this.policyPath, "utf-8");
 
     let parsed: unknown;
     try {
       parsed = yaml.load(raw);
     } catch (err) {
-      process.stderr.write(
-        `\x1b[31merror:\x1b[0m Failed to parse ${POLICY_FILE}: ${(err as Error).message}\n` +
-        `  Fix the YAML syntax in your policy file and try again.\n`
+      throw new Error(
+        `Failed to parse ${this.policyPath}: ${(err as Error).message}\n` +
+        `  Fix the YAML syntax in your policy file and try again.`,
       );
-      process.exit(1);
     }
 
     if (parsed === null || parsed === undefined || typeof parsed !== "object") {
-      this.config = { deny: [], allow: [], ask: [] };
-      return;
+      return { deny: [], allow: [], ask: [], limits: [] };
     }
 
     const obj = parsed as Record<string, unknown>;
     for (const key of Object.keys(obj)) {
       if (!VALID_TOP_KEYS.has(key)) {
-        process.stderr.write(
-          `\x1b[31merror:\x1b[0m Unknown key "${key}" in ${POLICY_FILE}\n` +
-          `  Valid keys are: deny, allow, ask. Remove or rename the unknown key.\n`
+        throw new Error(
+          `Unknown key "${key}" in ${this.policyPath}\n` +
+          `  Valid keys are: deny, allow, ask, limits. Remove or rename the unknown key.`,
         );
-        process.exit(1);
       }
     }
 
-    this.config = obj as PolicyConfig;
-    this.validateRules();
+    const config = obj as PolicyConfig;
+    this.validatePolicyRules(config);
+    this.validateLimitRules(config);
+    return config;
   }
 
-  private validateRules(): void {
+  private validatePolicyRules(config: PolicyConfig): void {
     for (const section of ["deny", "allow", "ask"] as const) {
-      const rules = this.config[section];
+      const rules = config[section];
       if (!rules) continue;
 
       if (!Array.isArray(rules)) {
-        process.stderr.write(
-          `\x1b[31merror:\x1b[0m "${section}" in ${this.policyPath} must be a list of rules.\n` +
-          `  Each rule should have a "command" and/or "path" field.\n`
+        throw new Error(
+          `"${section}" in ${this.policyPath} must be a list of rules.\n` +
+          `  Each rule should have a "command" and/or "path" field.`,
         );
-        process.exit(1);
       }
 
       for (const rule of rules) {
         if (typeof rule !== "object" || rule === null) {
-          process.stderr.write(
-            `\x1b[31merror:\x1b[0m Invalid rule in "${section}" in ${this.policyPath}.\n` +
-            `  Each rule must be an object with "command", "path", "tool", "match", and/or "url" fields.\n`
+          throw new Error(
+            `Invalid rule in "${section}" in ${this.policyPath}.\n` +
+            `  Each rule must be an object with "command", "path", "tool", "match", and/or "url" fields.`,
           );
-          process.exit(1);
         }
 
         const ruleObj = rule as Record<string, unknown>;
         for (const key of Object.keys(ruleObj)) {
           if (!VALID_RULE_KEYS.has(key)) {
-            process.stderr.write(
-              `\x1b[31merror:\x1b[0m Unknown rule key "${key}" in "${section}" in ${this.policyPath}.\n` +
-              `  Valid rule keys are: command, path, tool, match, url.\n`
+            throw new Error(
+              `Unknown rule key "${key}" in "${section}" in ${this.policyPath}.\n` +
+              `  Valid rule keys are: command, path, tool, match, url.`,
             );
-            process.exit(1);
           }
         }
 
         for (const key of ["command", "path", "tool", "url"] as const) {
           if (ruleObj[key] !== undefined && typeof ruleObj[key] !== "string") {
-            process.stderr.write(
-              `\x1b[31merror:\x1b[0m Invalid "${key}" value in "${section}" — must be a string.\n` +
-              `  Wrap the value in quotes in your policy file.\n`
+            throw new Error(
+              `Invalid "${key}" value in "${section}" — must be a string.\n` +
+              `  Wrap the value in quotes in your policy file.`,
             );
-            process.exit(1);
           }
         }
 
         if (ruleObj.match !== undefined) {
           if (typeof ruleObj.match !== "object" || ruleObj.match === null || Array.isArray(ruleObj.match)) {
-            process.stderr.write(
-              `\x1b[31merror:\x1b[0m Invalid "match" value in "${section}" — must be an object mapping argument names to glob patterns.\n`
+            throw new Error(
+              `Invalid "match" value in "${section}" — must be an object mapping argument names to glob patterns.`,
             );
-            process.exit(1);
           }
           for (const [k, v] of Object.entries(ruleObj.match as Record<string, unknown>)) {
             if (typeof v !== "string") {
-              process.stderr.write(
-                `\x1b[31merror:\x1b[0m Invalid match pattern for "${k}" in "${section}" — must be a string.\n`
+              throw new Error(
+                `Invalid match pattern for "${k}" in "${section}" — must be a string.`,
               );
-              process.exit(1);
             }
           }
         }
@@ -332,9 +434,113 @@ export class PolicyEngine {
     }
   }
 
+  private validateLimitRules(config: PolicyConfig): void {
+    const limits = config.limits;
+    if (!limits) return;
+
+    if (!Array.isArray(limits)) {
+      throw new Error(
+        `"limits" in ${this.policyPath} must be a list of limit rules.`,
+      );
+    }
+
+    for (const rule of limits) {
+      if (typeof rule !== "object" || rule === null) {
+        throw new Error(
+          `Invalid limit rule in ${this.policyPath}. Each rule needs tool, max, and window.`,
+        );
+      }
+      const r = rule as Record<string, unknown>;
+      if (typeof r.tool !== "string") {
+        throw new Error(`Limit rule missing "tool" (string) in ${this.policyPath}.`);
+      }
+      if (typeof r.max !== "number" || r.max <= 0) {
+        throw new Error(`Limit rule "max" must be a positive number in ${this.policyPath}.`);
+      }
+      if (typeof r.window !== "number" || r.window <= 0) {
+        throw new Error(`Limit rule "window" must be a positive number in ${this.policyPath}.`);
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Hot-reload
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Watch the policy file for changes and reload rules in place.
+   * Safe to call multiple times — only one watcher is active at a time.
+   * On reload failure (e.g. bad YAML), keeps existing rules and logs to stderr.
+   */
+  watch(onReload?: (filePath: string) => void): void {
+    if (this.watcher) return;
+
+    let debounce: NodeJS.Timeout | undefined;
+
+    this.watcher = fsWatch(this.policyPath, (eventType) => {
+      if (eventType !== "change") return;
+      clearTimeout(debounce);
+      debounce = setTimeout(() => {
+        try {
+          this.config = this.load();
+          onReload?.(this.policyPath);
+        } catch (err) {
+          process.stderr.write(`[AgentWall] Policy reload failed: ${err}\n`);
+          process.stderr.write(`[AgentWall] Keeping previous rules.\n`);
+        }
+      }, 200);
+    });
+
+    // Some editors replace the file rather than modifying it (Emacs, some IDEs).
+    // Watch the directory for rename events so we can restart the file watcher.
+    const dir = dirname(this.policyPath);
+    const filename = basename(this.policyPath);
+
+    this.dirWatcher = fsWatch(dir, (eventType, changedFile) => {
+      if (changedFile !== filename || eventType !== "rename") return;
+      this.watcher?.close();
+      this.watcher = undefined;
+      try {
+        this.config = this.load();
+        onReload?.(this.policyPath);
+      } catch {
+        // next save will retry
+      }
+      this.watch(onReload);
+    });
+  }
+
+  stopWatch(): void {
+    this.watcher?.close();
+    this.dirWatcher?.close();
+    this.watcher = undefined;
+    this.dirWatcher = undefined;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Evaluation
+  // ---------------------------------------------------------------------------
+
   evaluate(proposal: ActionProposal): Decision {
+    const sessionKey = proposal.sessionId ?? "global";
+    const toolName = proposal.toolName ?? proposal.command ?? "";
+    const limits = this.config.limits ?? [];
+
+    if (limits.length > 0) {
+      const result = this.rateLimiter.check(toolName, sessionKey, limits);
+      if (result.limited) {
+        const waitSecs = Math.ceil(result.retryAfterMs / 1000);
+        const message =
+          `AgentWall: ${toolName} rate limit reached ` +
+          `(${result.rule.max}/${result.rule.window}s). ` +
+          `Wait ${waitSecs} second${waitSecs === 1 ? "" : "s"}.`;
+        return { decision: "deny", reason: "rate-limit", message };
+      }
+      this.rateLimiter.record(toolName, sessionKey, limits);
+    }
+
     for (const rule of this.config.deny ?? []) {
-      if (ruleMatches(rule, proposal)) return "deny";
+      if (ruleMatches(rule, proposal)) return { decision: "deny", reason: "policy" };
     }
 
     // Non-path ask rules fire before path-based allow rules.
@@ -342,21 +548,23 @@ export class PolicyEngine {
     for (const rule of this.config.ask ?? []) {
       const hasPathCondition = rule.path !== undefined;
       if (!hasPathCondition && ruleMatches(rule, proposal)) {
-        return "ask";
+        return { decision: "ask", reason: "policy" };
       }
     }
 
     for (const rule of this.config.allow ?? []) {
-      if (ruleMatches(rule, proposal)) return "allow";
+      if (ruleMatches(rule, proposal)) return { decision: "allow", reason: "policy" };
     }
 
     // Remaining ask rules (path-based)
     for (const rule of this.config.ask ?? []) {
       const hasPathCondition = rule.path !== undefined;
-      if (hasPathCondition && ruleMatches(rule, proposal)) return "ask";
+      if (hasPathCondition && ruleMatches(rule, proposal)) {
+        return { decision: "ask", reason: "policy" };
+      }
     }
 
-    return "ask";
+    return { decision: "ask", reason: "policy" };
   }
 
   static defaultYaml(): string {

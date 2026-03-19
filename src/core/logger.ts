@@ -2,7 +2,7 @@ import { createWriteStream, mkdirSync, readFileSync, readdirSync, existsSync } f
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { WriteStream } from "node:fs";
-import type { LogEntry, Decision } from "./types.js";
+import type { LogEntry, DecisionVerdict } from "./types.js";
 
 const AGENTWALL_DIR = join(homedir(), ".agentwall");
 
@@ -11,7 +11,7 @@ const RED = "\x1b[31m";
 const YELLOW = "\x1b[33m";
 const RESET = "\x1b[0m";
 
-const DECISION_COLORS: Record<Decision, string> = {
+const DECISION_COLORS: Record<DecisionVerdict, string> = {
   allow: GREEN,
   deny: RED,
   ask: YELLOW,

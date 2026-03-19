@@ -1,6 +1,6 @@
 {
   "name": "agentwall",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Policy-enforcing MCP proxy — intercepts AI agent tool calls before they execute",
   "type": "module",
   "main": "dist/cli.js",

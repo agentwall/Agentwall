@@ -170,6 +170,54 @@ agentwall undo
 Restores all original MCP configs from backups. One command, fully
 reversible.
 
+## v0.5
+
+**Hot-reload** — Edit `~/.agentwall/policy.yaml` and changes apply instantly.
+No gateway restart, no proxy restart.
+
+**Rate limiting** — Cap how many times an agent can call a tool per minute.
+Catches runaway loops before they cause damage.
+
+```yaml
+limits:
+  - tool: exec
+    max: 10
+    window: 60    # max 10 shell commands per minute
+```
+
+When the limit is hit the agent receives a clear message:
+`AgentWall: exec rate limit reached (10/60s). Wait 43 seconds.`
+
+## What AgentWall protects against
+
+- Accidental destruction — rm -rf, DROP TABLE, TRUNCATE
+- Credential access — ~/.ssh, ~/.aws, ~/.gnupg
+- Shell config modification — ~/.bashrc, ~/.zshrc
+- Operations outside your workspace
+- Force pushes and destructive git operations
+- Runaway agents — rate limiting per tool per session
+- Common obfuscation patterns — eval, base64 decode
+
+## What AgentWall does not protect against
+
+- **Obfuscated commands** — `eval $(echo cm0= | base64 -d)`.
+  Pattern matching sees eval, not the decoded payload.
+
+- **Data exfiltration via request body**.
+  AgentWall sees the curl command, not the network payload.
+
+- **Prompt injection**.
+  Would require scanning every file before the agent reads it.
+
+- **Multi-step attacks**.
+  Each tool call is evaluated independently.
+  Read credentials then curl them out crosses two separate calls.
+
+AgentWall is a policy engine, not a security sandbox.
+The right complement is OS-level isolation — run your agent in a
+container with no credential access in the first place.
+AgentWall and OS isolation are complementary, not alternatives.
+
 ## Version history
 
 | Version | What gets intercepted | How |
@@ -178,6 +226,7 @@ reversible.
 | v0.2 | All tool calls in OpenClaw | Native OpenClaw plugin |
 | v0.3 | Everything MCP-speaking | Protocol-level MCP proxy |
 | v0.4 | Same + database rules | Policy engine v2 + zero-friction setup |
+| v0.5 | Same + rate limiting | Hot-reload + rate limiting |
 
 ## License
 

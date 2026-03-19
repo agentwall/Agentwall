@@ -23,12 +23,13 @@ import { EventLogger } from "../../core/logger.js";
 import { askUser, printDecision, useTtyInput } from "../../core/prompt.js";
 import type {
   ActionProposal,
-  Decision,
+  DecisionVerdict,
+  DecisionReason,
   LogEntry,
   McpProxyOptions,
 } from "../../core/types.js";
 
-const VERSION = "0.4.0";
+const VERSION = "0.5.0";
 
 const GREEN = "\x1b[32m";
 const RED = "\x1b[31m";
@@ -57,8 +58,8 @@ function extractPath(args: Record<string, unknown>): string {
 
 function buildLogEntry(
   proposal: ActionProposal,
-  decision: Decision,
-  resolvedBy: "policy" | "user",
+  decision: DecisionVerdict,
+  resolvedBy: DecisionReason,
 ): LogEntry {
   return {
     ts: new Date().toISOString(),
@@ -78,6 +79,10 @@ export async function startProxy(options: McpProxyOptions): Promise<void> {
 
   const policy = new PolicyEngine();
   const logger = new EventLogger();
+
+  policy.watch((filePath) => {
+    process.stderr.write(`[AgentWall] Policy reloaded: ${filePath}\n`);
+  });
 
   process.stderr.write(
     `\n  agentwall v${VERSION} — MCP proxy mode\n`,
@@ -174,24 +179,26 @@ export async function startProxy(options: McpProxyOptions): Promise<void> {
       agentId: client.getServerVersion()?.name ?? "",
     };
 
-    const decision = policy.evaluate(proposal);
+    const result = policy.evaluate(proposal);
 
-    if (decision === "deny") {
-      printDecision("deny", `${toolName}(${command})`, "policy rule matched");
-      logger.log(buildLogEntry(proposal, "deny", "policy"));
+    if (result.decision === "deny") {
+      const blockText = result.message ?? `AgentWall: '${toolName}' blocked by policy`;
+      const label = result.reason === "rate-limit" ? "rate limited" : "policy rule matched";
+      printDecision("deny", `${toolName}(${command})`, label);
+      logger.log(buildLogEntry(proposal, "deny", result.reason));
       return {
-        content: [{ type: "text" as const, text: `AgentWall: '${toolName}' blocked by policy` }],
+        content: [{ type: "text" as const, text: blockText }],
         isError: true,
       };
     }
 
-    if (decision === "allow") {
+    if (result.decision === "allow") {
       printDecision("allow", `${toolName}(${command})`, "auto-allow");
-      logger.log(buildLogEntry(proposal, "allow", "policy"));
+      logger.log(buildLogEntry(proposal, "allow", "auto-allow"));
       return await client.callTool(request.params);
     }
 
-    // decision === "ask" — prompt the user
+    // result.decision === "ask" — prompt the user
     let userDecision: "allow" | "deny";
     try {
       userDecision = await askUser(proposal, "flagged by policy");
@@ -289,6 +296,7 @@ export async function startProxy(options: McpProxyOptions): Promise<void> {
   // Graceful shutdown
   const shutdown = () => {
     process.stderr.write(`\n  ${DIM}shutting down...${RESET}\n`);
+    policy.stopWatch();
     logger.close();
     client.close().catch(() => {});
     server.close().catch(() => {});

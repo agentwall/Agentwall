@@ -19,9 +19,9 @@ import { EventLogger } from "./core/logger.js";
 import { askUser, printDecision } from "./core/prompt.js";
 import { OpenClawAdapter } from "./adapters/openclaw/client.js";
 import { startProxy } from "./adapters/mcp/proxy.js";
-import type { ActionProposal, Decision, LogEntry } from "./core/types.js";
+import type { ActionProposal, DecisionVerdict, DecisionReason, LogEntry } from "./core/types.js";
 
-const VERSION = "0.4.0";
+const VERSION = "0.5.0";
 const AGENTWALL_DIR = join(homedir(), ".agentwall");
 const LOCK_FILE = join(AGENTWALL_DIR, "agentwall.lock");
 
@@ -91,8 +91,8 @@ function releaseLock(): void {
 
 function buildLogEntry(
   proposal: ActionProposal,
-  decision: Decision,
-  resolvedBy: "policy" | "user",
+  decision: DecisionVerdict,
+  resolvedBy: DecisionReason,
 ): LogEntry {
   return {
     ts: new Date().toISOString(),
@@ -243,17 +243,21 @@ async function startCommand(args: string[]): Promise<void> {
   }
 
   acquireLock();
-  process.on("SIGINT", () => {
-    releaseLock();
-    process.exit(0);
-  });
-  process.on("SIGTERM", () => {
-    releaseLock();
-    process.exit(0);
-  });
 
   const policy = new PolicyEngine();
   const logger = new EventLogger();
+
+  policy.watch((filePath) => {
+    process.stderr.write(`[AgentWall] Policy reloaded: ${filePath}\n`);
+  });
+
+  const shutdown = () => {
+    policy.stopWatch();
+    releaseLock();
+    process.exit(0);
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
 
   process.stderr.write(
     `\n  agentwall v${VERSION} — runtime safety layer for local AI agents\n`,
@@ -265,15 +269,16 @@ async function startCommand(args: string[]): Promise<void> {
   const adapter = new OpenClawAdapter({ gatewayUrl, token, verbose });
 
   adapter.onProposal(async (proposal: ActionProposal) => {
-    const decision = policy.evaluate(proposal);
+    const result = policy.evaluate(proposal);
 
-    if (decision === "deny") {
-      printDecision("deny", proposal.command, "policy rule matched");
-      logger.log(buildLogEntry(proposal, "deny", "policy"));
+    if (result.decision === "deny") {
+      const label = result.reason === "rate-limit" ? "rate limited" : "policy rule matched";
+      printDecision("deny", proposal.command, label);
+      logger.log(buildLogEntry(proposal, "deny", result.reason));
       await adapter.resolve(proposal.approvalId, false);
-    } else if (decision === "allow") {
+    } else if (result.decision === "allow") {
       printDecision("allow", proposal.command, "auto-allow");
-      logger.log(buildLogEntry(proposal, "allow", "policy"));
+      logger.log(buildLogEntry(proposal, "allow", "auto-allow"));
       await adapter.resolve(proposal.approvalId, true);
     } else {
       const userDecision = await askUser(proposal, "flagged as sensitive");
@@ -707,9 +712,11 @@ function statusCommand(): void {
         const denyCount = Array.isArray(parsed.deny) ? parsed.deny.length : 0;
         const askCount = Array.isArray(parsed.ask) ? parsed.ask.length : 0;
         const allowCount = Array.isArray(parsed.allow) ? parsed.allow.length : 0;
+        const limitCount = Array.isArray(parsed.limits) ? parsed.limits.length : 0;
         process.stdout.write(`    • ${denyCount} deny rules\n`);
         process.stdout.write(`    • ${askCount} ask rules\n`);
         process.stdout.write(`    • ${allowCount} allow rules\n`);
+        process.stdout.write(`    • ${limitCount} rate limit rules\n`);
         process.stdout.write(`    • Default: ask\n`);
       }
     } catch {
@@ -771,6 +778,7 @@ function helpCommand(): void {
     v0.2  All tool calls via native OpenClaw plugin
     v0.3  Everything MCP-speaking via protocol-level proxy
     v0.4  Policy engine v2 (database rules) + zero-friction setup
+    v0.5  Hot-reload + rate limiting
 
 `);
 }

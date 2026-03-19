@@ -12,13 +12,31 @@ export interface ActionProposal {
 
 export type Runtime = "openclaw" | "claude-code" | "cursor" | "mcp";
 
-export type Decision = "allow" | "deny" | "ask";
+export type DecisionVerdict = "allow" | "deny" | "ask";
+
+export type DecisionReason =
+  | "policy"
+  | "user"
+  | "auto-allow"
+  | "rate-limit";
+
+export type Decision = {
+  decision: DecisionVerdict;
+  reason:   DecisionReason;
+  message?: string;
+};
+
+export type LimitRule = {
+  tool:   string;
+  max:    number;
+  window: number;
+};
 
 export interface LogEntry {
   ts:         string;
   runtime:    Runtime;
-  decision:   Decision;
-  resolvedBy: "policy" | "user";
+  decision:   DecisionVerdict;
+  resolvedBy: DecisionReason;
   command:    string;
   workingDir: string;
   approvalId: string;

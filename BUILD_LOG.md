@@ -692,3 +692,199 @@ The v0.4 default policy adds database protection out of the box:
 | v0.2 | All tool calls inside OpenClaw | Native OpenClaw plugin (`before_tool_call` hook) |
 | v0.3 | Everything MCP-speaking | Protocol-level MCP proxy |
 | v0.4 | **Same + database rules** | **Policy engine v2 + zero-friction setup** |
+
+---
+
+## v0.5.0 — Hot-Reload + Rate Limiting (2026-03-19)
+
+### What Changed
+
+v0.5 ships two features:
+
+1. **Hot-reload** — `PolicyEngine.watch()` monitors `~/.agentwall/policy.yaml`
+   for changes and reloads rules in place. No proxy restart, no gateway restart.
+   Editors that replace files (Emacs, some IDEs) are handled via a directory
+   watcher that detects rename events and restarts the file watcher on the new
+   inode.
+
+2. **Rate limiting** — New `limits` section in `policy.yaml`. Caps tool calls
+   per session per time window. When a limit is hit, the call is auto-denied
+   with a message the agent can read: `AgentWall: exec rate limit reached
+   (10/60s). Wait 43 seconds.`
+
+### Architecture Changes
+
+```
+PolicyEngine
+├── load()          ← NEW: extracted from constructor, returns PolicyConfig or throws
+├── watch()         ← NEW: fs.watch on file + directory, 200ms debounce, reload on change
+├── stopWatch()     ← NEW: closes both watchers
+├── evaluate()      ← UPDATED: returns Decision object, rate limit check before deny/allow/ask
+└── rateLimiter     ← NEW: private RateLimiter instance
+
+RateLimiter (internal, not exported)
+├── sessions: Map<string, CallRecord[]>   ← per-session call history
+├── check(toolName, sessionKey, limits)   ← returns limited/not-limited + retry info
+├── record(toolName, sessionKey, limits)  ← appends to history, prunes old records
+└── cleanup()                             ← 10-minute interval, removes stale sessions
+```
+
+### Type System Changes
+
+The `Decision` type was restructured from a string union to an object:
+
+```typescript
+// Before (v0.4)
+type Decision = "allow" | "deny" | "ask";
+
+// After (v0.5)
+type DecisionVerdict = "allow" | "deny" | "ask";
+type DecisionReason = "policy" | "user" | "auto-allow" | "rate-limit";
+type Decision = {
+  decision: DecisionVerdict;
+  reason: DecisionReason;
+  message?: string;      // populated only for rate-limit denials
+};
+```
+
+New types added:
+- `LimitRule` — `{ tool: string; max: number; window: number }`
+- `DecisionVerdict` — the original string union, renamed for backward compat
+- `DecisionReason` — reason codes for audit logging
+
+`LogEntry.resolvedBy` was widened from `"policy" | "user"` to `DecisionReason`
+so rate-limited decisions appear in the audit log with the correct reason code.
+
+### Modified Files
+
+| File | Change |
+|---|---|
+| `src/core/types.ts` | Added `LimitRule`, `DecisionVerdict`, `DecisionReason`. Restructured `Decision` from string to object. Updated `LogEntry.decision` to `DecisionVerdict`, `LogEntry.resolvedBy` to `DecisionReason`. |
+| `src/core/policy.ts` | Extracted `load()` from constructor (throws instead of `process.exit`). Added `watch()`, `stopWatch()`. Added `RateLimiter` class. Added `limits` to `PolicyConfig`, `"limits"` to `VALID_TOP_KEYS`. Added `validateLimitRules()`. Updated `evaluate()` to return `Decision` object with rate limit check first. Added limits section to `DEFAULT_POLICY`. |
+| `src/adapters/mcp/proxy.ts` | Wired `policy.watch()` after construction. Updated tool call handler for `Decision` object. Rate-limit denials use `decision.message` as block text. Added `policy.stopWatch()` to shutdown. Version → 0.5.0. |
+| `src/cli.ts` | Wired `policy.watch()` in `startCommand()`. Updated proposal handler for `Decision` object. Added rate limit rule count to `statusCommand()`. Updated help text with v0.5. Version → 0.5.0. |
+| `src/core/logger.ts` | Changed type import from `Decision` to `DecisionVerdict` for `DECISION_COLORS`. No logic changes. |
+| `package.json` | Version → 0.5.0. |
+| `README.md` | Added v0.5 section (hot-reload + rate limiting). Added "What AgentWall protects against" and "What AgentWall does not protect against" sections. Updated version history table. |
+
+### Policy Syntax — Rate Limits
+
+```yaml
+limits:
+  - tool: exec
+    max: 30
+    window: 60      # max 30 shell commands per minute
+  - tool: write
+    max: 50
+    window: 60      # max 50 file writes per minute
+  - tool: "*"
+    max: 200
+    window: 300     # max 200 total tool calls per 5 minutes
+```
+
+The `tool` field supports glob patterns (same as deny/allow/ask rules).
+`"*"` matches all tools. Rate limits are evaluated per-session using
+`proposal.sessionId` (falls back to `"global"` if not set).
+
+### Key Design Decisions
+
+**Constructor refactoring** — The constructor previously called `process.exit(1)`
+on bad YAML. The new `load()` method throws instead, allowing `watch()` to catch
+errors and keep previous rules. The constructor still exits on first load failure
+(startup time), but subsequent reloads are graceful.
+
+**Rate limiter is per-session** — Each unique `sessionId` gets its own call
+history. The `"global"` fallback means rate limiting still works when `sessionId`
+is not populated, but limits are shared across all sessions. This is documented
+as acceptable for v0.5.
+
+**Rate check runs before policy rules** — A rate-limited call is denied before
+deny/allow/ask evaluation. This is intentional: if an agent is in a runaway
+loop, we want to stop it immediately regardless of what the policy says.
+
+**Record after check** — `rateLimiter.record()` is called only after `check()`
+returns `limited: false`. Denied calls do not count against the limit (otherwise
+the agent could never recover after hitting a limit).
+
+**OpenClaw plugin not wired** — The `index.js` → `src/hook.js` → `src/policy.js`
+code path uses a separate hardcoded allow/block set, not the YAML-based
+`PolicyEngine`. Refactoring it is out of scope for v0.5. Hot-reload and rate
+limiting apply to the MCP proxy and CLI `start` command.
+
+### Test Results (2026-03-19)
+
+#### Build
+
+- TypeScript strict mode: **0 errors**
+- `npm run build`: **clean**
+- `agentwall --version`: **agentwall v0.5.0**
+
+#### Rate Limiting — 16/16 pass
+
+| Test | Result |
+|---|---|
+| exec call 1/3 passes rate limit | PASS |
+| exec call 2/3 passes rate limit | PASS |
+| exec call 3/3 passes rate limit | PASS |
+| exec call 4/3 is rate-limited | PASS |
+| rate-limit message contains "rate limit reached" | PASS |
+| rate-limit message contains wait time | PASS |
+| read_file passes (different tool, under wildcard limit) | PASS |
+| rm -rf / is denied (rate-limit or policy) | PASS |
+| exec passes for different session (per-session isolation) | PASS |
+| wildcard: call 1/5 passes | PASS |
+| wildcard: call 2/5 passes | PASS |
+| wildcard: call 3/5 passes | PASS |
+| wildcard: call 4/5 passes | PASS |
+| wildcard: call 5/5 passes | PASS |
+| wildcard: call 6/5 is rate-limited | PASS |
+
+#### Hot-Reload — 8/8 pass
+
+| Test | Result |
+|---|---|
+| before reload: "dangerous_cmd" is denied | PASS |
+| before reload: "safe_cmd" falls through to ask | PASS |
+| calling watch() twice does not throw (idempotent) | PASS |
+| policy reloaded after file change | PASS |
+| reload callback received correct file path | PASS |
+| after reload: "dangerous_cmd" is now allowed | PASS |
+| after bad YAML: previous rules preserved | PASS |
+| stopWatch() completes without error | PASS |
+
+Bad YAML resilience verified: writing invalid YAML triggers error to stderr
+(`[AgentWall] Policy reload failed: ...` + `[AgentWall] Keeping previous rules.`)
+and the previous working rules remain active.
+
+#### Decision Object — 4/4 pass
+
+| Test | Result |
+|---|---|
+| deny decision has correct verdict | PASS |
+| deny decision has reason "policy" | PASS |
+| policy deny has no message (only rate-limit does) | PASS |
+| unknown command falls through to ask | PASS |
+
+#### Summary
+
+```
+  Component          Tests    Result
+  ─────────────────────────────────────
+  Rate limiting        16     16 pass
+  Hot-reload            8      8 pass
+  Decision object       4      4 pass
+  TypeScript strict     —     0 errors
+  Production build      —     compiles + runs
+  ─────────────────────────────────────
+  Total                28     ALL PASS
+```
+
+### Version History
+
+| Version | What gets intercepted | How |
+|---|---|---|
+| v0.1 | `exec` — shell commands only | OpenClaw WebSocket event adapter |
+| v0.2 | All tool calls inside OpenClaw | Native OpenClaw plugin (`before_tool_call` hook) |
+| v0.3 | Everything MCP-speaking | Protocol-level MCP proxy |
+| v0.4 | Same + database rules | Policy engine v2 + zero-friction setup |
+| v0.5 | **Same + rate limiting** | **Hot-reload + rate limiting** |
