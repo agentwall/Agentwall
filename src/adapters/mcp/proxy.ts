@@ -76,31 +76,19 @@ function buildLogEntry(
   };
 }
 
-function checkTtyAvailable(): boolean {
-  return process.stderr.isTTY === true;
-}
-
 export async function startProxy(options: McpProxyOptions): Promise<void> {
   useTtyInput();
 
-  const hasTty = checkTtyAvailable();
   let webServer: AgentWallWebServer | null = null;
-  let approvalQueue: ApprovalQueue | null = null;
 
-  if (!hasTty) {
-    approvalQueue = new ApprovalQueue();
-    setWebApprovalQueue(approvalQueue);
-  }
+  const approvalQueue = new ApprovalQueue();
+  setWebApprovalQueue(approvalQueue);
 
-  const logger = new EventLogger(
-    approvalQueue
-      ? {
-          onEntry: (entry) => {
-            webServer?.notifyLogEntry(entry);
-          },
-        }
-      : undefined,
-  );
+  const logger = new EventLogger({
+    onEntry: (entry) => {
+      webServer?.notifyLogEntry(entry);
+    },
+  });
 
   const policy = new PolicyEngine();
 
@@ -109,18 +97,25 @@ export async function startProxy(options: McpProxyOptions): Promise<void> {
     webServer?.notifyPolicyReloaded();
   });
 
-  if (!hasTty && approvalQueue) {
-    const envPort = parseInt(process.env.AGENTWALL_PORT ?? "", 10) || 7823;
-    const port = options.port ?? envPort;
-    webServer = new AgentWallWebServer({
-      port,
-      policyPath: policy.policyPath,
-      logDir: logger.logDir,
-      approvalQueue,
-    });
+  const envPort = parseInt(process.env.AGENTWALL_PORT ?? "", 10) || 7823;
+  const port = options.port ?? envPort;
+  webServer = new AgentWallWebServer({
+    port,
+    policyPath: policy.policyPath,
+    logDir: logger.logDir,
+    approvalQueue,
+  });
+
+  try {
     await webServer.start();
     process.stderr.write(`[AgentWall] Web UI available at http://localhost:${port}\n`);
     process.stderr.write(`[AgentWall] Approval requests will appear in your browser.\n`);
+  } catch (err: any) {
+    if (err.code === "EADDRINUSE") {
+      process.stderr.write(`[AgentWall] Web UI already running at http://localhost:${port}\n`);
+    } else {
+      throw err;
+    }
   }
 
   process.stderr.write(

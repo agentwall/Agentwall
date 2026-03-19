@@ -3,6 +3,20 @@ import { logDecision } from './logger.js';
 import { getPolicy } from './policy.js';
 import { randomUUID } from 'node:crypto';
 
+function buildLogEntry(proposal, decision, resolvedBy, ctx) {
+  return {
+    ts: new Date().toISOString(),
+    runtime: proposal.runtime,
+    decision,
+    resolvedBy,
+    command: proposal.command,
+    workingDir: proposal.workingDir || '',
+    approvalId: proposal.approvalId,
+    sessionId: ctx?.sessionKey || '',
+    agentId: ctx?.agentId || '',
+  };
+}
+
 /**
  * Creates the before_tool_call hook handler.
  *
@@ -11,7 +25,9 @@ import { randomUUID } from 'node:crypto';
  *   { params: { ... } }                  → tool call runs with modified params
  *   undefined / void                     → tool call runs with original params
  */
-export function createBeforeToolCallHandler(logger) {
+export function createBeforeToolCallHandler(logger, options = {}) {
+  const { eventLogger } = options;
+
   return async (event, ctx) => {
     const { toolName, params } = event;
 
@@ -19,10 +35,21 @@ export function createBeforeToolCallHandler(logger) {
 
     const policy = getPolicy(toolName, params);
 
+    const proposal = {
+      approvalId: randomUUID(),
+      runtime: 'openclaw',
+      command: toolName,
+      toolName: toolName,
+      args: params,
+      workingDir: params?.path || params?.file || '',
+      toolInput: params,
+    };
+
     if (policy === 'block') {
       logger.warn(`[AgentWall] Blocked by policy: ${toolName}`);
       printDecision('deny', toolName, 'policy rule matched');
       logDecision({ toolName, params, decision: 'blocked', reason: 'policy', ctx });
+      eventLogger?.log(buildLogEntry(proposal, 'deny', 'policy', ctx));
       return {
         block: true,
         blockReason: `AgentWall: tool '${toolName}' is blocked by policy`
@@ -33,16 +60,9 @@ export function createBeforeToolCallHandler(logger) {
       logger.info(`[AgentWall] Auto-allowed: ${toolName}`);
       printDecision('allow', toolName, 'auto-allow');
       logDecision({ toolName, params, decision: 'allowed', reason: 'auto-allow', ctx });
+      eventLogger?.log(buildLogEntry(proposal, 'allow', 'auto-allow', ctx));
       return;
     }
-
-    const proposal = {
-      approvalId: randomUUID(),
-      runtime: 'openclaw',
-      command: toolName,
-      workingDir: params?.path || params?.file || '',
-      toolInput: params,
-    };
 
     let userDecision = 'deny';
     try {
@@ -51,6 +71,7 @@ export function createBeforeToolCallHandler(logger) {
       logger.error(`[AgentWall] Approval prompt failed: ${err.message}. Blocking for safety.`);
       printDecision('deny', toolName, 'prompt error — blocked for safety');
       logDecision({ toolName, params, decision: 'blocked', reason: 'prompt-error', ctx });
+      eventLogger?.log(buildLogEntry(proposal, 'deny', 'prompt-error', ctx));
       return {
         block: true,
         blockReason: 'AgentWall: approval prompt failed — blocked for safety'
@@ -66,6 +87,7 @@ export function createBeforeToolCallHandler(logger) {
       reason: 'user',
       ctx
     });
+    eventLogger?.log(buildLogEntry(proposal, approved ? 'allow' : 'deny', 'user', ctx));
 
     if (!approved) {
       return {

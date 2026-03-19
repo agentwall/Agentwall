@@ -51,9 +51,12 @@ export class AgentWallWebServer {
   private wss: WebSocketServer;
   private options: WebServerOptions;
 
+  private startError: Error | null = null;
+
   constructor(options: WebServerOptions) {
     this.options = options;
     this.server = http.createServer((req, res) => this.handleRequest(req, res));
+    this.server.on("error", (err) => { this.startError = err; });
     this.wss = new WebSocketServer({ server: this.server });
     this.wss.on("connection", (ws) => this.handleWebSocket(ws));
 
@@ -74,9 +77,12 @@ export class AgentWallWebServer {
   }
 
   start(): Promise<void> {
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       const port = this.options.port ?? DEFAULT_PORT;
+      const onError = (err: Error) => reject(err);
+      this.server.once("error", onError);
       this.server.listen(port, "127.0.0.1", () => {
+        this.server.removeListener("error", onError);
         resolve();
       });
     });
@@ -146,6 +152,8 @@ export class AgentWallWebServer {
         await this.handlePostPolicy(req, res);
       } else if (req.method === "GET" && pathname === "/api/log") {
         this.handleGetLog(req, res);
+      } else if (req.method === "POST" && pathname === "/api/request-approval") {
+        await this.handleRemoteApprovalRequest(req, res);
       } else if (req.method === "POST" && pathname.startsWith("/api/approve/")) {
         await this.handleApprove(req, res, pathname);
       } else {
@@ -305,5 +313,30 @@ export class AgentWallWebServer {
     }
 
     res.end(JSON.stringify({ ok: true }));
+  }
+
+  private async handleRemoteApprovalRequest(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): Promise<void> {
+    const body = await readBody(req);
+
+    let payload: { toolName?: string; params?: Record<string, unknown>; runtime?: string };
+    try {
+      payload = JSON.parse(body);
+    } catch {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ error: "Invalid JSON" }));
+      return;
+    }
+
+    const toolName = payload.toolName ?? "unknown";
+    const params = payload.params ?? {};
+    const runtime = payload.runtime ?? "unknown";
+
+    const decision = await this.options.approvalQueue.request(toolName, params, runtime);
+
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ decision }));
   }
 }

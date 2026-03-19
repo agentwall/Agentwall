@@ -148,7 +148,7 @@ export async function askUser(
     return "allow";
   }
 
-  if (inputMode === "tty" && !isTtyAvailable() && _webApprovalQueue) {
+  if (_webApprovalQueue) {
     const decision = await _webApprovalQueue.request(
       proposal.toolName ?? proposal.command,
       proposal.args ?? {},
