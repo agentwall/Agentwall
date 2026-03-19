@@ -11,6 +11,9 @@ const WORKSPACE_DIR = resolve(process.cwd());
 interface PolicyRule {
   command?: string;
   path?: string;
+  tool?: string;
+  match?: Record<string, string>;
+  url?: string;
 }
 
 interface PolicyConfig {
@@ -20,32 +23,91 @@ interface PolicyConfig {
 }
 
 const VALID_TOP_KEYS = new Set(["deny", "allow", "ask"]);
-const VALID_RULE_KEYS = new Set(["command", "path"]);
+const VALID_RULE_KEYS = new Set(["command", "path", "tool", "match", "url"]);
 
-const DEFAULT_POLICY = `# AgentWall policy
-# Applies to all connected runtimes (OpenClaw, Claude Code, Cursor, MCP agents)
-# Evaluation order: deny → allow → ask
-# Unmatched actions default to: ask
+const DEFAULT_POLICY = `# AgentWall Policy
+# Rules are evaluated in order: deny → allow → ask
+# Glob patterns: * matches anything except /, ** matches everything including /
+# Documentation: https://github.com/yourusername/agentwall
 
 deny:
+  # ── Filesystem: never touch credentials or system files ──────────────────
   - path: ~/.ssh/**
   - path: ~/.aws/**
-  - path: ~/.openclaw/credentials/**
   - path: ~/.gnupg/**
+  - path: ~/.npmrc
+  - path: ~/.netrc
+  - path: /etc/**
+  - path: /System/**
+
+  # ── Shell: never pipe from the internet ──────────────────────────────────
+  - command: "curl * | *"
+  - command: "curl *|*"
+  - command: "wget * | *"
+  - command: "wget *|*"
+
+  # ── Shell: never wipe root or home ───────────────────────────────────────
   - command: "rm -rf /"
-  - command: "curl * | bash"
-  - command: "wget * | bash"
+  - command: "rm -rf ~"
+  - command: "rm -rf /home"
+
+  # ── Database: never drop, truncate, or wipe ──────────────────────────────
+  - tool: "*"
+    match:
+      sql: "drop *"
+  - tool: "*"
+    match:
+      sql: "truncate *"
+  - tool: "*"
+    match:
+      query: "drop *"
+  - tool: "*"
+    match:
+      query: "truncate *"
+  - tool: "*"
+    match:
+      statement: "drop *"
+  - tool: "*"
+    match:
+      statement: "truncate *"
 
 ask:
-  - command: "rm -rf*"
+  # ── Database: always confirm destructive writes ───────────────────────────
+  - tool: "*"
+    match:
+      sql: "delete *"
+  - tool: "*"
+    match:
+      sql: "alter *"
+  - tool: "*"
+    match:
+      sql: "update *"
+  - tool: "*"
+    match:
+      query: "delete *"
+  - tool: "*"
+    match:
+      query: "alter *"
+  - tool: "*"
+    match:
+      query: "update *"
+
+  # ── Shell: confirm destructive commands ──────────────────────────────────
+  - command: "rm -rf *"
   - command: "rm -r *"
   - command: "sudo *"
   - command: "chmod -R *"
   - command: "dd *"
-  - path: "outside:workspace"
+
+  # ── Filesystem: confirm writes outside workspace ──────────────────────────
+  - tool: "write_file"
+    path: outside:workspace
+  - tool: "edit"
+    path: outside:workspace
 
 allow:
-  - path: "workspace/**"
+  # ── Everything inside your workspace is trusted ───────────────────────────
+  - path: workspace/**
 `;
 
 function escapeRegex(char: string): string {
@@ -112,18 +174,51 @@ function matchesPath(workingDir: string, pattern: string): boolean {
   return false;
 }
 
-function ruleMatches(rule: PolicyRule, proposal: ActionProposal): boolean {
-  const hasCommand = rule.command !== undefined;
-  const hasPath = rule.path !== undefined;
+function matchesTool(proposal: ActionProposal, pattern: string): boolean {
+  const name = proposal.toolName ?? proposal.command;
+  return globToRegex(pattern).test(name);
+}
 
-  if (hasCommand && hasPath) {
-    return matchesCommand(proposal.command, rule.command!) &&
-           matchesPath(proposal.workingDir, rule.path!);
+function matchesArgContent(proposal: ActionProposal, matchRules: Record<string, string>): boolean {
+  const args = proposal.args;
+  if (!args) return false;
+
+  for (const [argName, pattern] of Object.entries(matchRules)) {
+    const argValue = args[argName];
+    if (argValue === undefined) return false;
+    const valueStr = typeof argValue === "string" ? argValue : JSON.stringify(argValue);
+    if (!globToRegex(pattern.toLowerCase()).test(valueStr.toLowerCase())) return false;
   }
-  if (hasCommand) return matchesCommand(proposal.command, rule.command!);
-  if (hasPath) return matchesPath(proposal.workingDir, rule.path!);
+  return true;
+}
 
-  return false;
+function matchesUrl(proposal: ActionProposal, pattern: string): boolean {
+  const urlValue = proposal.args?.url ?? proposal.args?.uri;
+  if (!urlValue) return false;
+  return globToRegex(pattern).test(String(urlValue));
+}
+
+function ruleMatches(rule: PolicyRule, proposal: ActionProposal): boolean {
+  const conditions: boolean[] = [];
+
+  if (rule.command !== undefined) {
+    conditions.push(matchesCommand(proposal.command, rule.command));
+  }
+  if (rule.path !== undefined) {
+    conditions.push(matchesPath(proposal.workingDir, rule.path));
+  }
+  if (rule.tool !== undefined) {
+    conditions.push(matchesTool(proposal, rule.tool));
+  }
+  if (rule.match !== undefined) {
+    conditions.push(matchesArgContent(proposal, rule.match));
+  }
+  if (rule.url !== undefined) {
+    conditions.push(matchesUrl(proposal, rule.url));
+  }
+
+  if (conditions.length === 0) return false;
+  return conditions.every(Boolean);
 }
 
 export class PolicyEngine {
@@ -191,7 +286,7 @@ export class PolicyEngine {
         if (typeof rule !== "object" || rule === null) {
           process.stderr.write(
             `\x1b[31merror:\x1b[0m Invalid rule in "${section}" in ${this.policyPath}.\n` +
-            `  Each rule must be an object with "command" and/or "path" fields.\n`
+            `  Each rule must be an object with "command", "path", "tool", "match", and/or "url" fields.\n`
           );
           process.exit(1);
         }
@@ -201,26 +296,37 @@ export class PolicyEngine {
           if (!VALID_RULE_KEYS.has(key)) {
             process.stderr.write(
               `\x1b[31merror:\x1b[0m Unknown rule key "${key}" in "${section}" in ${this.policyPath}.\n` +
-              `  Valid rule keys are: command, path.\n`
+              `  Valid rule keys are: command, path, tool, match, url.\n`
             );
             process.exit(1);
           }
         }
 
-        if (ruleObj.command !== undefined && typeof ruleObj.command !== "string") {
-          process.stderr.write(
-            `\x1b[31merror:\x1b[0m Invalid "command" value in "${section}" — must be a string.\n` +
-            `  Wrap the value in quotes in your policy file.\n`
-          );
-          process.exit(1);
+        for (const key of ["command", "path", "tool", "url"] as const) {
+          if (ruleObj[key] !== undefined && typeof ruleObj[key] !== "string") {
+            process.stderr.write(
+              `\x1b[31merror:\x1b[0m Invalid "${key}" value in "${section}" — must be a string.\n` +
+              `  Wrap the value in quotes in your policy file.\n`
+            );
+            process.exit(1);
+          }
         }
 
-        if (ruleObj.path !== undefined && typeof ruleObj.path !== "string") {
-          process.stderr.write(
-            `\x1b[31merror:\x1b[0m Invalid "path" value in "${section}" — must be a string.\n` +
-            `  Wrap the value in quotes in your policy file.\n`
-          );
-          process.exit(1);
+        if (ruleObj.match !== undefined) {
+          if (typeof ruleObj.match !== "object" || ruleObj.match === null || Array.isArray(ruleObj.match)) {
+            process.stderr.write(
+              `\x1b[31merror:\x1b[0m Invalid "match" value in "${section}" — must be an object mapping argument names to glob patterns.\n`
+            );
+            process.exit(1);
+          }
+          for (const [k, v] of Object.entries(ruleObj.match as Record<string, unknown>)) {
+            if (typeof v !== "string") {
+              process.stderr.write(
+                `\x1b[31merror:\x1b[0m Invalid match pattern for "${k}" in "${section}" — must be a string.\n`
+              );
+              process.exit(1);
+            }
+          }
         }
       }
     }
@@ -231,10 +337,11 @@ export class PolicyEngine {
       if (ruleMatches(rule, proposal)) return "deny";
     }
 
-    // Command-only ask rules fire before path-based allow rules.
-    // Prevents workspace/** allow from silently permitting rm -rf, sudo, etc.
+    // Non-path ask rules fire before path-based allow rules.
+    // Prevents workspace/** allow from silently permitting rm -rf, sudo, DROP, etc.
     for (const rule of this.config.ask ?? []) {
-      if (rule.command && !rule.path && matchesCommand(proposal.command, rule.command)) {
+      const hasPathCondition = rule.path !== undefined;
+      if (!hasPathCondition && ruleMatches(rule, proposal)) {
         return "ask";
       }
     }
@@ -243,9 +350,10 @@ export class PolicyEngine {
       if (ruleMatches(rule, proposal)) return "allow";
     }
 
-    // Remaining ask rules (path-only or combined command+path)
+    // Remaining ask rules (path-based)
     for (const rule of this.config.ask ?? []) {
-      if (!rule.command && ruleMatches(rule, proposal)) return "ask";
+      const hasPathCondition = rule.path !== undefined;
+      if (hasPathCondition && ruleMatches(rule, proposal)) return "ask";
     }
 
     return "ask";

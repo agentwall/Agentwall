@@ -1,24 +1,32 @@
 {
   "name": "agentwall",
-  "version": "0.3.0",
-  "description": "Runtime safety layer for local AI agents — MCP proxy + OpenClaw plugin",
+  "version": "0.4.0",
+  "description": "Policy-enforcing MCP proxy — intercepts AI agent tool calls before they execute",
   "type": "module",
-  "main": "index.js",
+  "main": "dist/cli.js",
   "bin": {
-    "agentwall": "./dist/cli.js"
+    "agentwall": "dist/cli.js"
   },
+  "files": [
+    "dist/",
+    "index.js",
+    "src/hook.js",
+    "openclaw.plugin.json",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/cli.ts",
     "typecheck": "tsc --noEmit"
   },
   "keywords": [
+    "mcp",
     "ai",
     "agents",
     "safety",
-    "openclaw",
-    "llm",
-    "security"
+    "claude",
+    "cursor",
+    "tool-approval"
   ],
   "license": "MIT",
   "openclaw": {

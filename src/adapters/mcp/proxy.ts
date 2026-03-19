@@ -28,7 +28,7 @@ import type {
   McpProxyOptions,
 } from "../../core/types.js";
 
-const VERSION = "0.3.0";
+const VERSION = "0.4.0";
 
 const GREEN = "\x1b[32m";
 const RED = "\x1b[31m";
@@ -167,6 +167,8 @@ export async function startProxy(options: McpProxyOptions): Promise<void> {
       runtime: "mcp",
       command,
       workingDir,
+      toolName: toolName,
+      args: toolArgs,
       toolInput: toolArgs,
       sessionId: "",
       agentId: client.getServerVersion()?.name ?? "",

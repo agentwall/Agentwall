@@ -6,9 +6,14 @@ import {
   writeFileSync,
   unlinkSync,
   mkdirSync,
+  copyFileSync,
+  readdirSync,
 } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { homedir, platform } from "node:os";
+import { join, basename, dirname } from "node:path";
+import { execSync } from "node:child_process";
+import { createInterface } from "node:readline";
+import yaml from "js-yaml";
 import { PolicyEngine } from "./core/policy.js";
 import { EventLogger } from "./core/logger.js";
 import { askUser, printDecision } from "./core/prompt.js";
@@ -16,12 +21,13 @@ import { OpenClawAdapter } from "./adapters/openclaw/client.js";
 import { startProxy } from "./adapters/mcp/proxy.js";
 import type { ActionProposal, Decision, LogEntry } from "./core/types.js";
 
-const VERSION = "0.3.0";
+const VERSION = "0.4.0";
 const AGENTWALL_DIR = join(homedir(), ".agentwall");
 const LOCK_FILE = join(AGENTWALL_DIR, "agentwall.lock");
 
 const GREEN = "\x1b[32m";
 const RED = "\x1b[31m";
+const YELLOW = "\x1b[33m";
 const DIM = "\x1b[2m";
 const RESET = "\x1b[0m";
 
@@ -99,6 +105,123 @@ function buildLogEntry(
     sessionId: proposal.sessionId || "",
     agentId: proposal.agentId || "",
   };
+}
+
+// -----------------------------------------------------------------------------
+// MCP config detection
+// -----------------------------------------------------------------------------
+
+interface McpClientConfig {
+  label: string;
+  paths: string[];
+}
+
+function getMcpConfigLocations(): McpClientConfig[] {
+  const home = homedir();
+  const os = platform();
+
+  const configs: McpClientConfig[] = [
+    {
+      label: "Claude Desktop",
+      paths: os === "darwin"
+        ? [join(home, "Library", "Application Support", "Claude", "claude_desktop_config.json")]
+        : os === "win32"
+          ? [join(process.env.APPDATA ?? "", "Claude", "claude_desktop_config.json")]
+          : [join(home, ".config", "claude", "claude_desktop_config.json")],
+    },
+    {
+      label: "Cursor",
+      paths: os === "win32"
+        ? [join(process.env.APPDATA ?? "", "Cursor", "mcp.json")]
+        : [join(home, ".cursor", "mcp.json")],
+    },
+    {
+      label: "Windsurf",
+      paths: [join(home, ".codeium", "windsurf", "mcp_config.json")],
+    },
+    {
+      label: "Claude Code",
+      paths: [join(home, ".claude", "settings.json")],
+    },
+  ];
+
+  return configs;
+}
+
+interface DetectedConfig {
+  label: string;
+  path: string;
+  servers: Record<string, Record<string, unknown>>;
+}
+
+function detectConfigs(): DetectedConfig[] {
+  const found: DetectedConfig[] = [];
+
+  for (const client of getMcpConfigLocations()) {
+    for (const configPath of client.paths) {
+      if (!existsSync(configPath)) continue;
+      try {
+        const raw = readFileSync(configPath, "utf-8");
+        const parsed = JSON.parse(raw);
+        const servers = parsed.mcpServers;
+        if (servers && typeof servers === "object" && !Array.isArray(servers)) {
+          found.push({ label: client.label, path: configPath, servers });
+        }
+      } catch {
+        // skip unparseable configs
+      }
+    }
+  }
+
+  return found;
+}
+
+function isAlreadyWrapped(entry: Record<string, unknown>): boolean {
+  if (entry.command !== "agentwall") return false;
+  const args = entry.args;
+  if (!Array.isArray(args)) return false;
+  return args.includes("proxy") && args.includes("--");
+}
+
+function isHttpTransport(entry: Record<string, unknown>): boolean {
+  return typeof entry.url === "string" && !entry.command;
+}
+
+function wrapServerEntry(entry: Record<string, unknown>): Record<string, unknown> {
+  const origCommand = entry.command as string;
+  const origArgs = (entry.args ?? []) as string[];
+  return {
+    ...entry,
+    command: "agentwall",
+    args: ["proxy", "--", origCommand, ...origArgs],
+  };
+}
+
+function backupFile(filePath: string): string {
+  let bakPath = filePath + ".bak";
+  let counter = 2;
+  while (existsSync(bakPath)) {
+    bakPath = filePath + `.bak.${counter}`;
+    counter++;
+  }
+  copyFileSync(filePath, bakPath);
+  return bakPath;
+}
+
+function shortPath(p: string): string {
+  const home = homedir();
+  if (p.startsWith(home)) return "~" + p.slice(home.length);
+  return p;
+}
+
+function countProtection(servers: Record<string, Record<string, unknown>>): { total: number; protected: number } {
+  let total = 0;
+  let protectedCount = 0;
+  for (const entry of Object.values(servers)) {
+    total++;
+    if (isAlreadyWrapped(entry)) protectedCount++;
+  }
+  return { total, protected: protectedCount };
 }
 
 // -----------------------------------------------------------------------------
@@ -215,16 +338,7 @@ async function proxyCommand(args: string[]): Promise<void> {
   });
 }
 
-function setupCommand(runtime: string | undefined): void {
-  const validRuntimes = ["openclaw", "mcp"];
-  if (!runtime || !validRuntimes.includes(runtime)) {
-    process.stderr.write(
-      `${RED}error:${RESET} Unknown runtime "${runtime || ""}".\n` +
-      `  Available: ${validRuntimes.join(", ")}\n`,
-    );
-    process.exit(1);
-  }
-
+function setupLegacyCommand(runtime: string): void {
   if (runtime === "mcp") {
     process.stdout.write(`
   MCP proxy setup
@@ -259,7 +373,8 @@ function setupCommand(runtime: string | undefined): void {
     return;
   }
 
-  process.stdout.write(`
+  if (runtime === "openclaw") {
+    process.stdout.write(`
   OpenClaw setup
 
   Add this to ~/.openclaw/openclaw.json:
@@ -282,6 +397,278 @@ function setupCommand(runtime: string | undefined): void {
     agentwall start
 
 `);
+    return;
+  }
+
+  process.stderr.write(
+    `${RED}error:${RESET} Unknown runtime "${runtime}".\n` +
+    `  Available: openclaw, mcp\n` +
+    `  Or run 'agentwall setup' without arguments for automatic setup.\n`,
+  );
+  process.exit(1);
+}
+
+async function setupAutoCommand(args: string[]): Promise<void> {
+  const flags = parseFlags(args);
+  const dryRun = flags["dry-run"] === "true";
+
+  // Verify agentwall is on PATH
+  try {
+    execSync("agentwall --version", { stdio: "ignore" });
+  } catch {
+    process.stderr.write(
+      `${RED}error:${RESET} agentwall is not on your PATH.\n` +
+      `  Install it first: npm install -g agentwall\n`,
+    );
+    process.exit(1);
+  }
+
+  process.stdout.write(
+    dryRun
+      ? `\n  AgentWall Setup — Dry Run (no files will be changed)\n\n`
+      : `\n  AgentWall v${VERSION} — Setup\n\n  Scanning for MCP configurations...\n\n`,
+  );
+
+  const allClients = getMcpConfigLocations();
+  const detected = detectConfigs();
+
+  if (!dryRun) {
+    process.stdout.write("  Found:\n");
+    for (const client of allClients) {
+      const config = detected.find((d) => d.label === client.label);
+      if (config) {
+        const count = Object.keys(config.servers).length;
+        process.stdout.write(
+          `    ${GREEN}✓${RESET} ${config.label} — ${count} server${count !== 1 ? "s" : ""} (${shortPath(config.path)})\n`,
+        );
+      } else {
+        process.stdout.write(`    ${DIM}✗ ${client.label} — not installed${RESET}\n`);
+      }
+    }
+    process.stdout.write("\n");
+  }
+
+  if (detected.length === 0) {
+    process.stdout.write("  No MCP configurations found. Nothing to do.\n\n");
+    return;
+  }
+
+  // Compute transforms
+  interface ServerTransform {
+    name: string;
+    original: string;
+    transformed: string;
+    skipped: boolean;
+    skipReason?: string;
+  }
+  interface ConfigTransform {
+    config: DetectedConfig;
+    transforms: ServerTransform[];
+    hasChanges: boolean;
+  }
+
+  const configTransforms: ConfigTransform[] = [];
+
+  for (const config of detected) {
+    const transforms: ServerTransform[] = [];
+    let hasChanges = false;
+
+    for (const [name, entry] of Object.entries(config.servers)) {
+      if (isAlreadyWrapped(entry)) {
+        transforms.push({
+          name,
+          original: "",
+          transformed: "",
+          skipped: true,
+          skipReason: "already protected",
+        });
+        continue;
+      }
+
+      if (isHttpTransport(entry)) {
+        transforms.push({
+          name,
+          original: "",
+          transformed: "",
+          skipped: true,
+          skipReason: "HTTP transport not yet supported",
+        });
+        continue;
+      }
+
+      if (typeof entry.command !== "string") {
+        transforms.push({
+          name,
+          original: "",
+          transformed: "",
+          skipped: true,
+          skipReason: "no command field",
+        });
+        continue;
+      }
+
+      const origArgs = (entry.args ?? []) as string[];
+      const origStr = `${entry.command} ${origArgs.join(" ")}`.trim();
+      const newStr = `agentwall proxy -- ${origStr}`;
+      transforms.push({ name, original: origStr, transformed: newStr, skipped: false });
+      hasChanges = true;
+    }
+
+    configTransforms.push({ config, transforms, hasChanges });
+  }
+
+  // Print transforms
+  for (const ct of configTransforms) {
+    process.stdout.write(
+      dryRun
+        ? `  ${ct.config.label} (${shortPath(ct.config.path)})\n`
+        : `  ${ct.config.label}:\n`,
+    );
+
+    for (const t of ct.transforms) {
+      if (t.skipped) {
+        if (t.skipReason === "already protected") {
+          process.stdout.write(`    ${GREEN}✓${RESET} Already protected: ${t.name}\n`);
+        } else {
+          process.stdout.write(`    ⚠ ${t.name}: ${t.skipReason}, skipping\n`);
+        }
+      } else {
+        process.stdout.write(`    • ${t.name}    ${t.original}\n`);
+        if (dryRun) {
+          process.stdout.write(`      → ${t.transformed}\n`);
+        }
+      }
+    }
+    process.stdout.write("\n");
+  }
+
+  const totalChanges = configTransforms.reduce(
+    (sum, ct) => sum + ct.transforms.filter((t) => !t.skipped).length, 0,
+  );
+
+  if (totalChanges === 0) {
+    process.stdout.write("  All servers are already protected. Nothing to do.\n\n");
+    return;
+  }
+
+  if (dryRun) {
+    process.stdout.write("  Run without --dry-run to apply these changes.\n\n");
+    return;
+  }
+
+  // Prompt for confirmation
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const answer = await new Promise<string>((resolve) => {
+    rl.question("  Wrap all servers with AgentWall? [Y/n] ", (ans) => {
+      rl.close();
+      resolve(ans.trim());
+    });
+  });
+
+  if (answer.toLowerCase() === "n" || answer.toLowerCase() === "no") {
+    process.stdout.write("\n  Aborted.\n\n");
+    return;
+  }
+
+  process.stdout.write("\n  Backing up configs...\n");
+
+  // Backup and write
+  for (const ct of configTransforms) {
+    if (!ct.hasChanges) continue;
+
+    const bakPath = backupFile(ct.config.path);
+    process.stdout.write(`    ${GREEN}✓${RESET} Backed up ${basename(ct.config.path)} → ${basename(bakPath)}\n`);
+
+    const raw = readFileSync(ct.config.path, "utf-8");
+    const parsed = JSON.parse(raw);
+
+    for (const t of ct.transforms) {
+      if (t.skipped) continue;
+      parsed.mcpServers[t.name] = wrapServerEntry(parsed.mcpServers[t.name]);
+    }
+
+    writeFileSync(ct.config.path, JSON.stringify(parsed, null, 2) + "\n");
+  }
+
+  process.stdout.write("\n  Wrapping servers...\n");
+  for (const ct of configTransforms) {
+    for (const t of ct.transforms) {
+      if (t.skipped) continue;
+      process.stdout.write(`    ${GREEN}✓${RESET} ${t.name}\n`);
+    }
+  }
+
+  const clientNames = configTransforms
+    .filter((ct) => ct.hasChanges)
+    .map((ct) => ct.config.label)
+    .join(" and ");
+
+  process.stdout.write(`
+  Done. Restart ${clientNames} to activate AgentWall.
+
+  Note: In GUI clients (Cursor, Claude Desktop), AgentWall runs in policy-only
+  mode. Interactive approval prompts are available in Claude Code and terminal
+  contexts. Run \`agentwall init\` to configure your policy rules.
+
+  Run \`agentwall status\` to verify protection.
+  Run \`agentwall undo\` to remove AgentWall from all configs.
+
+`);
+}
+
+function undoCommand(): void {
+  const configs = getMcpConfigLocations();
+  const restored: string[] = [];
+
+  for (const client of configs) {
+    for (const configPath of client.paths) {
+      // Find the most recent .bak file
+      const dir = dirname(configPath);
+      const base = basename(configPath);
+
+      if (!existsSync(dir)) continue;
+
+      let files: string[];
+      try {
+        files = readdirSync(dir);
+      } catch {
+        continue;
+      }
+
+      // Collect all backup files for this config, sorted by specificity (highest number first)
+      const bakFiles = files
+        .filter((f) => f === base + ".bak" || f.startsWith(base + ".bak."))
+        .sort((a, b) => {
+          const numA = a === base + ".bak" ? 1 : parseInt(a.split(".bak.")[1], 10);
+          const numB = b === base + ".bak" ? 1 : parseInt(b.split(".bak.")[1], 10);
+          return numA - numB;
+        });
+
+      if (bakFiles.length === 0) continue;
+
+      // Restore the original .bak (the first backup ever made)
+      const bakPath = join(dir, bakFiles[0]);
+      copyFileSync(bakPath, configPath);
+
+      // Remove all backup files
+      for (const bf of bakFiles) {
+        try {
+          unlinkSync(join(dir, bf));
+        } catch {
+          // best-effort
+        }
+      }
+
+      restored.push(configPath);
+      process.stdout.write(`  ${GREEN}✓${RESET} Restored ${shortPath(configPath)}\n`);
+    }
+  }
+
+  if (restored.length === 0) {
+    process.stdout.write("  No AgentWall backups found. Nothing to undo.\n");
+  }
+
+  process.stdout.write("\n");
 }
 
 function replayCommand(n?: number): void {
@@ -289,65 +676,101 @@ function replayCommand(n?: number): void {
 }
 
 function statusCommand(): void {
-  process.stdout.write(`\n  agentwall v${VERSION}\n\n`);
+  process.stdout.write(`\n  AgentWall v${VERSION}\n\n`);
 
+  // Protection status
+  process.stdout.write("  Protection:\n");
+  const allClients = getMcpConfigLocations();
+  const detected = detectConfigs();
+
+  for (const client of allClients) {
+    const config = detected.find((d) => d.label === client.label);
+    if (config) {
+      const { total, protected: prot } = countProtection(config.servers);
+      const allProtected = prot === total;
+      const icon = allProtected ? `${GREEN}✓${RESET}` : `${YELLOW}⚠${RESET}`;
+      process.stdout.write(`    ${icon} ${config.label} — ${prot}/${total} servers protected\n`);
+    } else {
+      process.stdout.write(`    ${DIM}✗ ${client.label} — not installed${RESET}\n`);
+    }
+  }
+  process.stdout.write("\n");
+
+  // Policy stats
   const policyPath = join(AGENTWALL_DIR, "policy.yaml");
   if (existsSync(policyPath)) {
-    process.stdout.write(`  policy:  ${policyPath}\n`);
-  } else {
-    process.stdout.write(`  policy:  not configured (using defaults)\n`);
-  }
-
-  if (existsSync(LOCK_FILE)) {
-    const pid = parseInt(readFileSync(LOCK_FILE, "utf-8").trim(), 10);
-    let running = false;
-    if (!isNaN(pid)) {
-      try {
-        process.kill(pid, 0);
-        running = true;
-      } catch {
-        // not running
+    process.stdout.write(`  Policy: ${shortPath(policyPath)}\n`);
+    try {
+      const raw = readFileSync(policyPath, "utf-8");
+      const parsed = yaml.load(raw) as Record<string, unknown[]> | null;
+      if (parsed) {
+        const denyCount = Array.isArray(parsed.deny) ? parsed.deny.length : 0;
+        const askCount = Array.isArray(parsed.ask) ? parsed.ask.length : 0;
+        const allowCount = Array.isArray(parsed.allow) ? parsed.allow.length : 0;
+        process.stdout.write(`    • ${denyCount} deny rules\n`);
+        process.stdout.write(`    • ${askCount} ask rules\n`);
+        process.stdout.write(`    • ${allowCount} allow rules\n`);
+        process.stdout.write(`    • Default: ask\n`);
       }
+    } catch {
+      // skip if can't parse
     }
-    process.stdout.write(
-      `  status:  ${running ? `${GREEN}running${RESET} (PID ${pid})` : `${DIM}not running (stale lock)${RESET}`}\n`,
-    );
   } else {
-    process.stdout.write(`  status:  ${DIM}not running${RESET}\n`);
+    process.stdout.write(`  Policy: not configured (using defaults)\n`);
   }
-
   process.stdout.write("\n");
+
+  // Session log
+  const today = new Date().toISOString().slice(0, 10);
+  const logPath = join(AGENTWALL_DIR, `session-${today}.jsonl`);
+  if (existsSync(logPath)) {
+    process.stdout.write(`  Session log: ${shortPath(logPath)}\n`);
+    try {
+      const lines = readFileSync(logPath, "utf-8").trim().split("\n").filter(Boolean);
+      let allowed = 0, approved = 0, blocked = 0;
+      for (const line of lines) {
+        try {
+          const entry = JSON.parse(line) as LogEntry;
+          if (entry.decision === "allow" && entry.resolvedBy === "policy") allowed++;
+          else if (entry.decision === "allow" && entry.resolvedBy === "user") approved++;
+          else if (entry.decision === "deny") blocked++;
+        } catch {
+          // skip malformed lines
+        }
+      }
+      const total = allowed + approved + blocked;
+      process.stdout.write(`    • ${total} decisions today (${allowed} allowed, ${approved} approved, ${blocked} blocked)\n`);
+    } catch {
+      // skip
+    }
+  }
+  process.stdout.write("\n");
+
+  process.stdout.write(`  Run \`agentwall replay\` to view recent decisions.\n`);
+  process.stdout.write(`  Run \`agentwall undo\` to remove AgentWall from all configs.\n\n`);
 }
 
 function helpCommand(): void {
   process.stdout.write(`
-  agentwall v${VERSION} — runtime safety layer for local AI agents
+  agentwall v${VERSION} — policy-enforcing MCP proxy for AI agents
 
   Usage:
-    agentwall proxy -- <command> [args...]
-    agentwall start [--token <token>] [--gateway <url>] [--verbose]
-    agentwall init
-    agentwall setup <runtime>
-    agentwall replay [N]
-    agentwall status
-    agentwall --help
+    agentwall setup [--dry-run]          Auto-detect and wrap all MCP configs
+    agentwall setup <runtime>            Print manual setup instructions (openclaw, mcp)
+    agentwall undo                       Restore all original MCP configs
+    agentwall proxy -- <command> [args]  Wrap a single MCP server
+    agentwall init                       Create ~/.agentwall/policy.yaml with default rules
+    agentwall status                     Show protection status
+    agentwall replay [N]                 Show last N log entries (default 50)
+    agentwall start [--token <token>]    Start OpenClaw gateway adapter
+    agentwall --version                  Print version
+    agentwall --help                     Show this help
 
-  Commands:
-    proxy            MCP proxy — wrap any MCP server with policy enforcement
-    start            Start OpenClaw gateway adapter
-    init             Create ~/.agentwall/policy.yaml with default rules
-    setup <runtime>  Print setup instructions (openclaw, mcp)
-    replay [N]       Show last N log entries (default 50)
-    status           Show version and status
-
-  Proxy usage:
-    agentwall proxy -- npx -y @modelcontextprotocol/server-filesystem ~
-    agentwall proxy -- node /path/to/custom-server.js
-
-  Flags:
-    --token <token>  OpenClaw gateway token (or set OPENCLAW_GATEWAY_TOKEN)
-    --gateway <url>  Gateway WebSocket URL (default: ws://127.0.0.1:18789)
-    --verbose        Enable debug output
+  Version history:
+    v0.1  Shell commands via OpenClaw WebSocket adapter
+    v0.2  All tool calls via native OpenClaw plugin
+    v0.3  Everything MCP-speaking via protocol-level proxy
+    v0.4  Policy engine v2 (database rules) + zero-friction setup
 
 `);
 }
@@ -370,14 +793,27 @@ const remaining = process.argv.slice(3);
     case "init":
       initCommand();
       break;
-    case "setup":
-      setupCommand(remaining[0]);
+    case "setup": {
+      const firstArg = remaining[0];
+      if (firstArg === "openclaw" || firstArg === "mcp") {
+        setupLegacyCommand(firstArg);
+      } else {
+        await setupAutoCommand(remaining);
+      }
+      break;
+    }
+    case "undo":
+      undoCommand();
       break;
     case "replay":
       replayCommand(remaining[0] ? parseInt(remaining[0], 10) : undefined);
       break;
     case "status":
       statusCommand();
+      break;
+    case "--version":
+    case "-v":
+      process.stdout.write(`agentwall v${VERSION}\n`);
       break;
     case "--help":
     case "-h":

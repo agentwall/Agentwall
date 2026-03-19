@@ -514,3 +514,181 @@ Both `openclaw` and `mcp` runtimes log to the same session file.
 | v0.1 | `exec` — shell commands only | OpenClaw WebSocket event adapter |
 | v0.2 | All tool calls inside OpenClaw | Native OpenClaw plugin (`before_tool_call` hook) |
 | v0.3 | **Everything MCP-speaking** | **Protocol-level MCP proxy** |
+
+---
+
+## v0.4.0 — Policy Engine v2 + Zero-Friction Setup (2026-03-19)
+
+### What Changed
+
+v0.4 ships two features together:
+
+1. **Policy engine v2** — adds argument content matching (`match` field) and tool
+   name matching (`tool` field) to the YAML policy engine. This enables rules like
+   "block any SQL query containing DROP" across any MCP tool, regardless of what
+   the tool is called or which argument carries the SQL.
+
+2. **Zero-friction setup** — `agentwall setup` auto-detects Claude Desktop, Cursor,
+   Windsurf, and Claude Code MCP configurations, wraps every server with the proxy,
+   backs up originals, and tells the user to restart. No JSON editing required.
+
+### Architecture
+
+```
+agentwall/
+├── src/
+│   ├── cli.ts                        ← CLI entry (UPDATED: setup, undo, status, --version)
+│   ├── core/
+│   │   ├── types.ts                  ← UPDATED: toolName + args on ActionProposal
+│   │   ├── policy.ts                 ← UPDATED: tool, match, url fields + case-insensitive matching
+│   │   ├── logger.ts                 ← unchanged
+│   │   └── prompt.ts                 ← unchanged
+│   └── adapters/
+│       ├── openclaw/
+│       │   └── client.ts             ← unchanged
+│       └── mcp/
+│           └── proxy.ts              ← UPDATED: passes toolName + args to policy engine
+├── index.js                          ← unchanged
+├── openclaw.plugin.json              ← unchanged
+├── package.json                      ← UPDATED: v0.4.0, files, keywords, description
+├── tsconfig.json                     ← unchanged
+└── README.md                         ← REWRITTEN for launch
+```
+
+### Modified Files
+
+| File | Change |
+|---|---|
+| `src/core/types.ts` | Added `toolName?: string` and `args?: Record<string, unknown>` to `ActionProposal` |
+| `src/core/policy.ts` | Added `tool`, `match`, `url` to `PolicyRule`. New matchers: `matchesTool()`, `matchesArgContent()` (case-insensitive), `matchesUrl()`. Rewrote `ruleMatches()` with conditions array + AND logic. Updated `evaluate()` so non-path ask rules (tool/match) fire before allow. Expanded `DEFAULT_POLICY` with database protection rules. Updated validation for new field types. |
+| `src/adapters/mcp/proxy.ts` | Passes `toolName` and `args` in `ActionProposal` construction. Version → 0.4.0. |
+| `src/cli.ts` | Added `setup` (auto-detect), `setup --dry-run`, `undo`, `--version`. MCP config detection for Claude Desktop, Cursor, Windsurf, Claude Code with platform-aware paths. Wrapping transform with idempotency check. Backup logic (`.bak`, `.bak.2`, etc.). Extended `status` with protection counts, policy rule counts, session log stats. Version → 0.4.0. |
+| `package.json` | Version → 0.4.0. Description updated. Added `files` field. Updated keywords. |
+| `README.md` | Full rewrite: hook, one-liner install, client support table, policy-override demo, database protection examples, command reference, architecture diagram, version history. |
+
+### Policy Engine v2 — How It Works
+
+New `PolicyRule` fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `tool` | `string` | MCP tool name glob (e.g. `"*"`, `"query"`, `"pg_*"`) |
+| `match` | `Record<string, string>` | Argument name → glob pattern. Keys are argument field names, values are glob patterns. |
+| `url` | `string` | URL pattern shorthand (checks `args.url` or `args.uri`) |
+
+All fields in a rule use AND logic — every specified condition must match.
+The `match` field uses **case-insensitive** glob matching for SQL safety
+(`DROP`, `drop`, `Drop` all match `"drop *"`).
+
+The `evaluate()` ordering was updated: non-path ask rules now fire before
+path-based allow rules. This prevents `allow: workspace/**` from silently
+permitting `DELETE FROM users` inside the workspace.
+
+### Setup Command — How It Works
+
+```
+agentwall setup [--dry-run]
+```
+
+1. Verifies `agentwall` is on PATH via `execSync('agentwall --version')`
+2. Scans platform-aware config locations for Claude Desktop, Cursor, Windsurf, Claude Code
+3. Parses each JSON config, finds `mcpServers` entries
+4. For each server entry:
+   - **Skip** if already wrapped (idempotency: `command === "agentwall"` + args contain `proxy` and `--`)
+   - **Skip** if HTTP transport (`url` field without `command`) with warning
+   - **Transform**: `command → "agentwall"`, `args → ["proxy", "--", origCommand, ...origArgs]`
+5. `--dry-run`: prints transforms without writing
+6. Interactive: prompts `Y/n`, backs up configs (`.bak` with numbered fallback), writes transforms
+7. Prints restart instructions with GUI/policy-only mode caveat
+
+### Undo Command
+
+```
+agentwall undo
+```
+
+Finds all `.bak` files in known config locations, restores the original (first
+backup), removes all backup files. Prints "Nothing to undo" if no backups exist.
+
+### Status Command
+
+```
+agentwall status
+```
+
+Now shows:
+- Protection status per client (N/M servers protected)
+- Policy rule counts (deny/ask/allow)
+- Today's session log stats (allowed/approved/blocked)
+
+### Default Policy (generated by `agentwall init`)
+
+The v0.4 default policy adds database protection out of the box:
+
+**Deny rules (17):**
+- Filesystem: `~/.ssh/**`, `~/.aws/**`, `~/.gnupg/**`, `~/.npmrc`, `~/.netrc`, `/etc/**`, `/System/**`
+- Shell: `curl * | *`, `wget * | *`, `rm -rf /`, `rm -rf ~`, `rm -rf /home`
+- Database: DROP and TRUNCATE across `sql`, `query`, `statement` argument names
+
+**Ask rules (13):**
+- Database: DELETE, ALTER, UPDATE across `sql`, `query` argument names
+- Shell: `rm -rf *`, `rm -r *`, `sudo *`, `chmod -R *`, `dd *`
+- Filesystem: `write_file` and `edit` outside workspace
+
+**Allow rules (1):**
+- `workspace/**`
+
+### Test Results (2026-03-19)
+
+#### Build
+
+- TypeScript strict mode: **0 errors**
+- `npm run build`: **clean**
+- `npm pack --dry-run`: **19 files, 19.3 kB** — correct `files` field
+
+#### CLI Commands — 7/7 pass
+
+| Command | Result |
+|---|---|
+| `agentwall --version` | `agentwall v0.4.0` |
+| `agentwall --help` | New help text with all v0.4 commands + version history |
+| `agentwall setup --dry-run` | Detected Claude Desktop (1 server) + Cursor (1 server), showed transforms |
+| `agentwall setup openclaw` | Legacy instructions preserved |
+| `agentwall setup mcp` | Legacy instructions preserved |
+| `agentwall status` | Protection counts, policy stats, session log stats |
+| `agentwall undo` | "No backups found" (correct — none exist) |
+
+#### Policy Engine — 22/22 pass
+
+| Category | Tests | Details |
+|---|---|---|
+| Case insensitivity | 3 | `DROP TABLE`, `Drop Table`, `drop table` — all denied |
+| Argument name coverage | 3 | `sql`, `query`, `statement` fields — all matched for DROP |
+| Deny rules (database) | 2 | TRUNCATE via `sql`, DROP via `statement` |
+| Ask rules (database) | 3 | DELETE, ALTER, UPDATE — all routed to ask |
+| Non-match passthrough | 2 | SELECT, INSERT — fall to default ask |
+| Wrong arg name | 1 | DROP in unmatched arg name (`body`) correctly ignored |
+| Shell deny | 5 | `curl pipe bash`, `wget pipe`, `rm -rf /`, `rm -rf ~`, `rm -rf /home` |
+| Shell ask | 2 | `rm -rf mydir`, `sudo *` |
+| Path deny | 2 | `~/.ssh/id_rsa`, `~/.aws/credentials` |
+| Wildcard tool | 1 | `tool: "*"` matches any tool name |
+
+#### E2E Setup/Undo Cycle — 6/6 pass
+
+| Test | Result |
+|---|---|
+| Wrap transform | Correct `agentwall proxy --` prefix |
+| Idempotency detection | Already-wrapped entries detected |
+| HTTP transport skip | `url`-based entries correctly skipped |
+| Full wrap cycle | stdio servers wrapped, HTTP skipped |
+| Double-wrap prevention | Zero changes on second pass |
+| Backup + undo | Originals restored, `.bak` files cleaned up |
+
+### Version History
+
+| Version | What gets intercepted | How |
+|---|---|---|
+| v0.1 | `exec` — shell commands only | OpenClaw WebSocket event adapter |
+| v0.2 | All tool calls inside OpenClaw | Native OpenClaw plugin (`before_tool_call` hook) |
+| v0.3 | Everything MCP-speaking | Protocol-level MCP proxy |
+| v0.4 | **Same + database rules** | **Policy engine v2 + zero-friction setup** |

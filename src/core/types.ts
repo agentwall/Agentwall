@@ -3,6 +3,8 @@ export interface ActionProposal {
   runtime:    Runtime;
   command:    string;
   workingDir: string;
+  toolName?:  string;
+  args?:      Record<string, unknown>;
   toolInput?: unknown;
   sessionId?: string;
   agentId?:   string;
