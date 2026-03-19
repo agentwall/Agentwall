@@ -1,12 +1,20 @@
 import * as http from "node:http";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer, type WebSocket } from "ws";
 import yaml from "js-yaml";
 import type { ApprovalQueue } from "./approval.js";
+import {
+  getClients,
+  protectServer,
+  ignoreServer,
+  unignoreServer,
+  type ClientEntry,
+} from "../core/clients.js";
 
-const VERSION = "0.6.0";
+const VERSION = "0.7.0";
 const DEFAULT_PORT = 7823;
 
 const MIME_TYPES: Record<string, string> = {
@@ -17,6 +25,14 @@ const MIME_TYPES: Record<string, string> = {
   ".png": "image/png",
   ".svg": "image/svg+xml",
 };
+
+const APP_NAMES: Record<string, string> = {
+  "claude-desktop": "Claude",
+  "cursor": "Cursor",
+  "windsurf": "Windsurf",
+};
+
+const PENDING_RESTART_CLEAR_DELAY_MS = 5000;
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -52,6 +68,9 @@ export class AgentWallWebServer {
   private options: WebServerOptions;
 
   private startError: Error | null = null;
+
+  private pendingRestarts = new Map<string, number>();
+  private lastSeen = new Map<string, number>();
 
   constructor(options: WebServerOptions) {
     this.options = options;
@@ -105,6 +124,20 @@ export class AgentWallWebServer {
     this.broadcast({ type: "log_entry", entry });
   }
 
+  notifyClientActive(runtime: string): void {
+    const prev = this.lastSeen.get(runtime);
+    const now = Date.now();
+    this.lastSeen.set(runtime, now);
+
+    if (prev && this.pendingRestarts.has(runtime)) {
+      const wrappedAt = this.pendingRestarts.get(runtime)!;
+      if (wrappedAt < now - PENDING_RESTART_CLEAR_DELAY_MS) {
+        this.pendingRestarts.delete(runtime);
+        this.broadcast({ type: "client_restarted", runtime });
+      }
+    }
+  }
+
   private broadcast(message: unknown): void {
     const json = JSON.stringify(message);
     for (const client of this.wss.clients) {
@@ -146,6 +179,8 @@ export class AgentWallWebServer {
         this.serveStatic(res, "policy.html");
       } else if (req.method === "GET" && pathname === "/log") {
         this.serveStatic(res, "log.html");
+      } else if (req.method === "GET" && pathname === "/clients") {
+        this.serveStatic(res, "clients.html");
       } else if (req.method === "GET" && pathname === "/api/status") {
         this.handleStatus(res);
       } else if (req.method === "GET" && pathname === "/api/policy") {
@@ -154,6 +189,16 @@ export class AgentWallWebServer {
         await this.handlePostPolicy(req, res);
       } else if (req.method === "GET" && pathname === "/api/log") {
         this.handleGetLog(req, res);
+      } else if (req.method === "GET" && pathname === "/api/clients") {
+        this.handleGetClients(res);
+      } else if (req.method === "POST" && pathname === "/api/clients/protect") {
+        await this.handleProtect(req, res);
+      } else if (req.method === "POST" && pathname === "/api/clients/ignore") {
+        await this.handleIgnore(req, res);
+      } else if (req.method === "POST" && pathname === "/api/clients/unignore") {
+        await this.handleUnignore(req, res);
+      } else if (req.method === "POST" && pathname === "/api/clients/restart") {
+        await this.handleRestart(req, res);
       } else if (req.method === "POST" && pathname === "/api/request-approval") {
         await this.handleRemoteApprovalRequest(req, res);
       } else if (req.method === "POST" && pathname.startsWith("/api/approve/")) {
@@ -281,6 +326,192 @@ export class AgentWallWebServer {
 
     res.end(JSON.stringify(entries));
   }
+
+  // ---------------------------------------------------------------------------
+  // Clients API
+  // ---------------------------------------------------------------------------
+
+  private handleGetClients(res: http.ServerResponse): void {
+    const clients = this.getClientsWithState();
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ clients }));
+  }
+
+  private getClientsWithState(): ClientEntry[] {
+    const clients = getClients();
+    const now = Date.now();
+
+    for (const client of clients) {
+      const seenAt = this.lastSeen.get(client.id);
+      if (seenAt && now - seenAt < 120_000) {
+        client.active = true;
+      }
+
+      if (this.pendingRestarts.has(client.id)) {
+        client.pendingRestart = true;
+      }
+    }
+
+    return clients;
+  }
+
+  private async handleProtect(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): Promise<void> {
+    const body = await readBody(req);
+    let payload: { client?: string; server?: string };
+    try {
+      payload = JSON.parse(body);
+    } catch {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ error: "Invalid JSON" }));
+      return;
+    }
+
+    if (!payload.client || !payload.server) {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ error: "Missing client or server field" }));
+      return;
+    }
+
+    const updated = protectServer(payload.client, payload.server);
+    if (!updated) {
+      res.statusCode = 404;
+      res.end(JSON.stringify({ error: "Client or server not found" }));
+      return;
+    }
+
+    this.pendingRestarts.set(payload.client, Date.now());
+
+    updated.pendingRestart = true;
+    const seenAt = this.lastSeen.get(payload.client);
+    if (seenAt && Date.now() - seenAt < 120_000) {
+      updated.active = true;
+    }
+
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ ok: true, client: updated }));
+  }
+
+  private async handleIgnore(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): Promise<void> {
+    const body = await readBody(req);
+    let payload: { client?: string; server?: string };
+    try {
+      payload = JSON.parse(body);
+    } catch {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ error: "Invalid JSON" }));
+      return;
+    }
+
+    if (!payload.client || !payload.server) {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ error: "Missing client or server field" }));
+      return;
+    }
+
+    ignoreServer(payload.client, payload.server);
+
+    const clients = this.getClientsWithState();
+    const updated = clients.find((c) => c.id === payload.client);
+
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ ok: true, client: updated ?? null }));
+  }
+
+  private async handleUnignore(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): Promise<void> {
+    const body = await readBody(req);
+    let payload: { client?: string; server?: string };
+    try {
+      payload = JSON.parse(body);
+    } catch {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ error: "Invalid JSON" }));
+      return;
+    }
+
+    if (!payload.client || !payload.server) {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ error: "Missing client or server field" }));
+      return;
+    }
+
+    unignoreServer(payload.client, payload.server);
+    const updated = protectServer(payload.client, payload.server);
+
+    if (updated) {
+      this.pendingRestarts.set(payload.client, Date.now());
+      updated.pendingRestart = true;
+      const seenAt = this.lastSeen.get(payload.client);
+      if (seenAt && Date.now() - seenAt < 120_000) {
+        updated.active = true;
+      }
+    }
+
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ ok: true, client: updated ?? null }));
+  }
+
+  private async handleRestart(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): Promise<void> {
+    const body = await readBody(req);
+    let payload: { client?: string };
+    try {
+      payload = JSON.parse(body);
+    } catch {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ error: "Invalid JSON" }));
+      return;
+    }
+
+    if (!payload.client) {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ error: "Missing client field" }));
+      return;
+    }
+
+    const appName = APP_NAMES[payload.client];
+    if (!appName) {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ error: `Restart not supported for "${payload.client}"` }));
+      return;
+    }
+
+    const script = `
+      sleep 1
+      osascript -e 'quit app "${appName}"'
+      sleep 3
+      open -a "${appName}"
+    `;
+
+    spawn("bash", ["-c", script], {
+      detached: true,
+      stdio: "ignore",
+    }).unref();
+
+    const clientId = payload.client;
+    const RESTART_CLEAR_DELAY_MS = 8000;
+    setTimeout(() => {
+      this.pendingRestarts.delete(clientId);
+      this.broadcast({ type: "client_restarted", runtime: clientId });
+    }, RESTART_CLEAR_DELAY_MS);
+
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ ok: true }));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Approval endpoints
+  // ---------------------------------------------------------------------------
 
   private async handleApprove(
     req: http.IncomingMessage,

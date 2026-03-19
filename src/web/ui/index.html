@@ -67,7 +67,13 @@
     color: #e1e4e8;
     margin-bottom: 0.5rem;
   }
-  .empty-state p { margin-bottom: 1.5rem; }
+  .empty-state p { margin-bottom: 1rem; }
+  .clients-summary {
+    font-size: 0.8125rem;
+    color: #8b949e;
+    margin-bottom: 1.5rem;
+  }
+  .clients-summary .protected-label { color: #3fb950; }
   .empty-links { display: flex; gap: 1rem; justify-content: center; }
 
   .approval-card {
@@ -163,6 +169,7 @@
   <a href="/" class="nav-active">Approval</a>
   <a href="/policy">Policy</a>
   <a href="/log">Log</a>
+  <a href="/clients">Clients</a>
   <span class="status-dot" id="statusDot" title="Connected"></span>
 </nav>
 
@@ -170,7 +177,9 @@
   <div id="emptyState" class="empty-state">
     <h2>No pending approvals</h2>
     <p>Approval requests from your agents will appear here.</p>
+    <div class="clients-summary" id="clientsSummary"></div>
     <div class="empty-links">
+      <a href="/clients">Manage Clients</a>
       <a href="/policy">Policy Editor</a>
       <a href="/log">View Logs</a>
     </div>
@@ -327,7 +336,28 @@
     });
   };
 
+  function loadClientsSummary() {
+    fetch("/api/clients")
+      .then(function (res) { return res.json(); })
+      .then(function (data) {
+        var names = [];
+        for (var i = 0; i < data.clients.length; i++) {
+          var c = data.clients[i];
+          if (!c.installed) continue;
+          var allProtected = c.kind === "plugin" ||
+            (c.servers.length > 0 && c.servers.every(function (s) { return s.protected || s.ignored; }));
+          if (allProtected) names.push(c.name);
+        }
+        var el = document.getElementById("clientsSummary");
+        if (names.length > 0) {
+          el.innerHTML = '<span class="protected-label">Protected:</span> ' + names.join(" &middot; ");
+        }
+      })
+      .catch(function () {});
+  }
+
   connect();
+  loadClientsSummary();
 })();
 </script>
 </body>

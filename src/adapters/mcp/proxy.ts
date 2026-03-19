@@ -34,7 +34,7 @@ import type {
   Runtime,
 } from "../../core/types.js";
 
-const VERSION = "0.6.0";
+const VERSION = "0.7.0";
 
 const CLIENT_NAME_TO_RUNTIME: [string, Runtime][] = [
   ["claude desktop", "claude-desktop"],
@@ -280,6 +280,8 @@ export async function startProxy(options: McpProxyOptions): Promise<void> {
 
     const clientName = server.getClientVersion()?.name;
     const runtime = detectRuntime(clientName);
+
+    webServer?.notifyClientActive(runtime);
 
     const proposal: ActionProposal = {
       approvalId: randomUUID(),

@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgentWall — Clients</title>
+<link rel="icon" href="/logo.png" type="image/png">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: #0f1117;
+    color: #e1e4e8;
+    min-height: 100vh;
+  }
+  a { color: #58a6ff; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  .nav {
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+    padding: 0.75rem 1.5rem;
+    background: #161b22;
+    border-bottom: 1px solid #30363d;
+  }
+  .nav-brand {
+    font-weight: 700;
+    font-size: 1.25rem;
+    color: #e1e4e8;
+    margin-right: auto;
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+  }
+  .nav-logo {
+    width: 32px;
+    height: 32px;
+  }
+  .nav a { font-size: 1rem; }
+  .nav-active { color: #e1e4e8; font-weight: 600; }
+
+  .status-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #3fb950;
+    margin-left: 0.5rem;
+    vertical-align: middle;
+  }
+  .status-dot.disconnected { background: #f85149; }
+
+  .container {
+    max-width: 720px;
+    margin: 2rem auto;
+    padding: 0 1rem;
+  }
+
+  .page-title {
+    font-size: 1.25rem;
+    font-weight: 600;
+    margin-bottom: 1.5rem;
+  }
+
+  .client-card {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    margin-bottom: 1rem;
+    overflow: hidden;
+  }
+
+  .client-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1rem 1.25rem;
+    border-bottom: 1px solid #30363d;
+  }
+
+  .client-name {
+    font-size: 1rem;
+    font-weight: 600;
+  }
+
+  .client-badge {
+    font-size: 0.8125rem;
+    font-weight: 500;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .badge-active { color: #3fb950; }
+  .badge-restart { color: #d29922; }
+  .badge-notinstalled { color: #8b949e; }
+
+  .client-body {
+    padding: 0;
+  }
+
+  .server-row {
+    display: flex;
+    align-items: center;
+    padding: 0.75rem 1.25rem;
+    border-bottom: 1px solid #21262d;
+  }
+  .server-row:last-child { border-bottom: none; }
+
+  .server-icon {
+    width: 1.25rem;
+    text-align: center;
+    margin-right: 0.75rem;
+    font-size: 0.875rem;
+    flex-shrink: 0;
+  }
+  .icon-protected { color: #3fb950; }
+  .icon-unprotected { color: #8b949e; }
+  .icon-ignored { color: #484f58; }
+
+  .server-name {
+    font-size: 0.9375rem;
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    margin-right: 0.75rem;
+  }
+
+  .server-status {
+    font-size: 0.8125rem;
+    color: #8b949e;
+    margin-right: auto;
+  }
+  .status-ignored { color: #484f58; }
+
+  .server-actions {
+    display: flex;
+    gap: 0.5rem;
+    flex-shrink: 0;
+  }
+
+  .btn-sm {
+    padding: 0.3rem 0.75rem;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    cursor: pointer;
+    background: #21262d;
+    color: #c9d1d9;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .btn-sm:hover {
+    background: #30363d;
+    border-color: #484f58;
+  }
+  .btn-sm:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+  .btn-sm.btn-protect {
+    background: #238636;
+    border-color: #238636;
+    color: #fff;
+  }
+  .btn-sm.btn-protect:hover {
+    background: #2ea043;
+    border-color: #2ea043;
+  }
+
+  .btn-restart {
+    padding: 0.3rem 0.75rem;
+    border: 1px solid #d29922;
+    border-radius: 6px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    cursor: pointer;
+    background: transparent;
+    color: #d29922;
+    transition: background 0.15s;
+  }
+  .btn-restart:hover {
+    background: rgba(210, 153, 34, 0.15);
+  }
+  .btn-restart:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+
+  .plugin-info {
+    padding: 0.75rem 1.25rem;
+    color: #8b949e;
+    font-size: 0.875rem;
+    line-height: 1.5;
+  }
+  .plugin-info .plugin-active {
+    color: #3fb950;
+    font-weight: 500;
+  }
+
+  .not-installed-msg {
+    padding: 0.75rem 1.25rem;
+    color: #484f58;
+    font-size: 0.875rem;
+  }
+
+  .loading {
+    text-align: center;
+    padding: 4rem 1rem;
+    color: #8b949e;
+  }
+
+  .last-updated {
+    text-align: center;
+    color: #484f58;
+    font-size: 0.75rem;
+    margin-top: 1rem;
+    padding-bottom: 2rem;
+  }
+</style>
+</head>
+<body>
+
+<nav class="nav">
+  <span class="nav-brand"><img src="/logo.png" alt="" class="nav-logo">AgentWall</span>
+  <a href="/">Approval</a>
+  <a href="/policy">Policy</a>
+  <a href="/log">Log</a>
+  <a href="/clients" class="nav-active">Clients</a>
+  <span class="status-dot" id="statusDot" title="Connected"></span>
+</nav>
+
+<div class="container">
+  <h1 class="page-title">Clients &amp; MCP Servers</h1>
+  <div id="content"><div class="loading">Loading clients...</div></div>
+  <div class="last-updated" id="lastUpdated"></div>
+</div>
+
+<script>
+(function () {
+  var POLL_INTERVAL = 30000;
+  var ws = null;
+  var pollTimer = null;
+
+  function connect() {
+    var proto = location.protocol === "https:" ? "wss:" : "ws:";
+    ws = new WebSocket(proto + "//" + location.host + "/ws");
+
+    ws.onopen = function () {
+      document.getElementById("statusDot").classList.remove("disconnected");
+      document.getElementById("statusDot").title = "Connected";
+    };
+
+    ws.onclose = function () {
+      document.getElementById("statusDot").classList.add("disconnected");
+      document.getElementById("statusDot").title = "Disconnected";
+      setTimeout(connect, 2000);
+    };
+
+    ws.onmessage = function (event) {
+      var msg = JSON.parse(event.data);
+      if (msg.type === "client_restarted") {
+        fetchClients();
+      }
+    };
+  }
+
+  function fetchClients() {
+    fetch("/api/clients")
+      .then(function (res) { return res.json(); })
+      .then(function (data) { render(data.clients); })
+      .catch(function () {
+        document.getElementById("content").innerHTML =
+          '<div class="loading">Failed to load clients. Retrying...</div>';
+      });
+  }
+
+  function render(clients) {
+    var html = "";
+    for (var i = 0; i < clients.length; i++) {
+      html += renderClient(clients[i]);
+    }
+    document.getElementById("content").innerHTML = html;
+    document.getElementById("lastUpdated").textContent =
+      "Last updated: " + new Date().toLocaleTimeString();
+  }
+
+  function renderClient(client) {
+    var badge = renderBadge(client);
+    var restartBtn = "";
+
+    if (client.pendingRestart && client.kind === "mcp") {
+      restartBtn = ' <button class="btn-restart" onclick="restartClient(\'' +
+        client.id + '\')" title="Restart ' + escapeHtml(client.name) + '">Restart</button>';
+    }
+
+    var body = "";
+
+    if (!client.installed) {
+      body = '<div class="not-installed-msg">Install ' +
+        escapeHtml(client.name) + ' to see ' +
+        (client.kind === "plugin" ? "plugin status" : "servers") + ' here.</div>';
+    } else if (client.kind === "plugin") {
+      body = renderPluginBody(client);
+    } else if (client.servers.length === 0) {
+      body = '<div class="not-installed-msg">No MCP servers configured.</div>';
+    } else {
+      for (var j = 0; j < client.servers.length; j++) {
+        body += renderServer(client, client.servers[j]);
+      }
+    }
+
+    return '<div class="client-card">' +
+      '<div class="client-header">' +
+        '<span class="client-name">' + escapeHtml(client.name) + '</span>' +
+        '<span>' + badge + restartBtn + '</span>' +
+      '</div>' +
+      '<div class="client-body">' + body + '</div>' +
+    '</div>';
+  }
+
+  function renderBadge(client) {
+    if (!client.installed) {
+      return '<span class="client-badge badge-notinstalled">' +
+        '<span>&#9675;</span> Not installed</span>';
+    }
+    if (client.pendingRestart) {
+      return '<span class="client-badge badge-restart">' +
+        '<span>&#9888;</span> Restart needed</span>';
+    }
+    if (client.active) {
+      return '<span class="client-badge badge-active">' +
+        '<span>&#10003;</span> Active</span>';
+    }
+    return '<span class="client-badge badge-active">' +
+      '<span>&#10003;</span> Installed</span>';
+  }
+
+  function renderPluginBody(client) {
+    if (!client.installed) return "";
+    return '<div class="plugin-info">' +
+      '<div><span class="plugin-active">&#10003; Native plugin active</span></div>' +
+      '<div>All tool calls intercepted via before_tool_call hook</div>' +
+    '</div>';
+  }
+
+  function renderServer(client, server) {
+    var icon, statusText, statusClass, actions;
+
+    if (server.protected) {
+      icon = '<span class="server-icon icon-protected">&#10003;</span>';
+      statusText = "protected";
+      statusClass = "";
+      actions = "";
+    } else if (server.ignored) {
+      icon = '<span class="server-icon icon-ignored">&#9675;</span>';
+      statusText = "ignored";
+      statusClass = " status-ignored";
+      actions = '<button class="btn-sm btn-protect" onclick="unignoreAndProtect(\'' +
+        escapeHtml(client.id) + "', '" + escapeHtml(server.name) +
+        "')\">Protect</button>";
+    } else {
+      icon = '<span class="server-icon icon-unprotected">&#9675;</span>';
+      statusText = "not protected";
+      statusClass = "";
+      actions = '<button class="btn-sm btn-protect" onclick="protectServer(\'' +
+        escapeHtml(client.id) + "', '" + escapeHtml(server.name) +
+        "')\">Protect</button>" +
+        '<button class="btn-sm" onclick="ignoreServer(\'' +
+        escapeHtml(client.id) + "', '" + escapeHtml(server.name) +
+        "')\">Ignore</button>";
+    }
+
+    return '<div class="server-row">' +
+      icon +
+      '<span class="server-name">' + escapeHtml(server.name) + '</span>' +
+      '<span class="server-status' + statusClass + '">' + statusText + '</span>' +
+      '<div class="server-actions">' + actions + '</div>' +
+    '</div>';
+  }
+
+  function escapeHtml(str) {
+    return str
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function postAction(url, body) {
+    return fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(function (res) { return res.json(); });
+  }
+
+  window.protectServer = function (clientId, serverName) {
+    postAction("/api/clients/protect", { client: clientId, server: serverName })
+      .then(function () { fetchClients(); });
+  };
+
+  window.ignoreServer = function (clientId, serverName) {
+    postAction("/api/clients/ignore", { client: clientId, server: serverName })
+      .then(function () { fetchClients(); });
+  };
+
+  window.unignoreAndProtect = function (clientId, serverName) {
+    postAction("/api/clients/unignore", { client: clientId, server: serverName })
+      .then(function () { fetchClients(); });
+  };
+
+  window.restartClient = function (clientId) {
+    postAction("/api/clients/restart", { client: clientId })
+      .then(function () {
+        fetchClients();
+      });
+  };
+
+  connect();
+  fetchClients();
+  pollTimer = setInterval(fetchClients, POLL_INTERVAL);
+})();
+</script>
+</body>
+</html>

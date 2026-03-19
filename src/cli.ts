@@ -22,8 +22,19 @@ import { startProxy } from "./adapters/mcp/proxy.js";
 import { ApprovalQueue } from "./web/approval.js";
 import { AgentWallWebServer } from "./web/server.js";
 import type { ActionProposal, DecisionVerdict, DecisionReason, LogEntry } from "./core/types.js";
+import {
+  getSupportedClients,
+  detectConfigs,
+  isAlreadyWrapped,
+  isHttpTransport,
+  wrapServerEntry,
+  backupFile,
+  shortPath,
+  countProtection,
+  type DetectedConfig,
+} from "./core/clients.js";
 
-const VERSION = "0.6.0";
+const VERSION = "0.7.0";
 const AGENTWALL_DIR = join(homedir(), ".agentwall");
 const LOCK_FILE = join(AGENTWALL_DIR, "agentwall.lock");
 
@@ -109,122 +120,7 @@ function buildLogEntry(
   };
 }
 
-// -----------------------------------------------------------------------------
-// MCP config detection
-// -----------------------------------------------------------------------------
-
-interface McpClientConfig {
-  label: string;
-  paths: string[];
-}
-
-function getMcpConfigLocations(): McpClientConfig[] {
-  const home = homedir();
-  const os = platform();
-
-  const configs: McpClientConfig[] = [
-    {
-      label: "Claude Desktop",
-      paths: os === "darwin"
-        ? [join(home, "Library", "Application Support", "Claude", "claude_desktop_config.json")]
-        : os === "win32"
-          ? [join(process.env.APPDATA ?? "", "Claude", "claude_desktop_config.json")]
-          : [join(home, ".config", "claude", "claude_desktop_config.json")],
-    },
-    {
-      label: "Cursor",
-      paths: os === "win32"
-        ? [join(process.env.APPDATA ?? "", "Cursor", "mcp.json")]
-        : [join(home, ".cursor", "mcp.json")],
-    },
-    {
-      label: "Windsurf",
-      paths: [join(home, ".codeium", "windsurf", "mcp_config.json")],
-    },
-    {
-      label: "Claude Code",
-      paths: [join(home, ".claude", "settings.json")],
-    },
-  ];
-
-  return configs;
-}
-
-interface DetectedConfig {
-  label: string;
-  path: string;
-  servers: Record<string, Record<string, unknown>>;
-}
-
-function detectConfigs(): DetectedConfig[] {
-  const found: DetectedConfig[] = [];
-
-  for (const client of getMcpConfigLocations()) {
-    for (const configPath of client.paths) {
-      if (!existsSync(configPath)) continue;
-      try {
-        const raw = readFileSync(configPath, "utf-8");
-        const parsed = JSON.parse(raw);
-        const servers = parsed.mcpServers;
-        if (servers && typeof servers === "object" && !Array.isArray(servers)) {
-          found.push({ label: client.label, path: configPath, servers });
-        }
-      } catch {
-        // skip unparseable configs
-      }
-    }
-  }
-
-  return found;
-}
-
-function isAlreadyWrapped(entry: Record<string, unknown>): boolean {
-  if (entry.command !== "agentwall") return false;
-  const args = entry.args;
-  if (!Array.isArray(args)) return false;
-  return args.includes("proxy") && args.includes("--");
-}
-
-function isHttpTransport(entry: Record<string, unknown>): boolean {
-  return typeof entry.url === "string" && !entry.command;
-}
-
-function wrapServerEntry(entry: Record<string, unknown>): Record<string, unknown> {
-  const origCommand = entry.command as string;
-  const origArgs = (entry.args ?? []) as string[];
-  return {
-    ...entry,
-    command: "agentwall",
-    args: ["proxy", "--", origCommand, ...origArgs],
-  };
-}
-
-function backupFile(filePath: string): string {
-  let bakPath = filePath + ".bak";
-  let counter = 2;
-  while (existsSync(bakPath)) {
-    bakPath = filePath + `.bak.${counter}`;
-    counter++;
-  }
-  copyFileSync(filePath, bakPath);
-  return bakPath;
-}
-
-function shortPath(p: string): string {
-  const home = homedir();
-  if (p.startsWith(home)) return "~" + p.slice(home.length);
-  return p;
-}
-
-function countProtection(servers: Record<string, Record<string, unknown>>): { total: number; protected: number } {
-  let total = 0;
-  let protectedCount = 0;
-  for (const entry of Object.values(servers)) {
-    total++;
-    if (isAlreadyWrapped(entry)) protectedCount++;
-  }
-  return { total, protected: protectedCount };
-}
+// MCP config detection is now in src/core/clients.ts
 
 // -----------------------------------------------------------------------------
 // Commands
@@ -436,20 +332,20 @@ async function setupAutoCommand(args: string[]): Promise<void> {
       : `\n  AgentWall v${VERSION} — Setup\n\n  Scanning for MCP configurations...\n\n`,
   );
 
-  const allClients = getMcpConfigLocations();
+  const allClients = getSupportedClients().filter((c) => c.kind === "mcp");
   const detected = detectConfigs();
 
   if (!dryRun) {
     process.stdout.write("  Found:\n");
     for (const client of allClients) {
-      const config = detected.find((d) => d.label === client.label);
+      const config = detected.find((d) => d.label === client.name);
       if (config) {
         const count = Object.keys(config.servers).length;
         process.stdout.write(
           `    ${GREEN}✓${RESET} ${config.label} — ${count} server${count !== 1 ? "s" : ""} (${shortPath(config.path)})\n`,
         );
       } else {
-        process.stdout.write(`    ${DIM}✗ ${client.label} — not installed${RESET}\n`);
+        process.stdout.write(`    ${DIM}✗ ${client.name} — not installed${RESET}\n`);
       }
     }
     process.stdout.write("\n");
@@ -624,11 +520,11 @@ async function setupAutoCommand(args: string[]): Promise<void> {
 }
 
 function undoCommand(): void {
-  const configs = getMcpConfigLocations();
+  const configs = getSupportedClients().filter((c) => c.kind === "mcp");
   const restored: string[] = [];
 
   for (const client of configs) {
-    for (const configPath of client.paths) {
+    for (const configPath of client.configPaths) {
       // Find the most recent .bak file
       const dir = dirname(configPath);
       const base = basename(configPath);
@@ -687,18 +583,18 @@ function statusCommand(): void {
 
   // Protection status
   process.stdout.write("  Protection:\n");
-  const allClients = getMcpConfigLocations();
+  const allClients = getSupportedClients().filter((c) => c.kind === "mcp");
   const detected = detectConfigs();
 
   for (const client of allClients) {
-    const config = detected.find((d) => d.label === client.label);
+    const config = detected.find((d) => d.label === client.name);
     if (config) {
       const { total, protected: prot } = countProtection(config.servers);
       const allProtected = prot === total;
       const icon = allProtected ? `${GREEN}✓${RESET}` : `${YELLOW}⚠${RESET}`;
       process.stdout.write(`    ${icon} ${config.label} — ${prot}/${total} servers protected\n`);
     } else {
-      process.stdout.write(`    ${DIM}✗ ${client.label} — not installed${RESET}\n`);
+      process.stdout.write(`    ${DIM}✗ ${client.name} — not installed${RESET}\n`);
     }
   }
   process.stdout.write("\n");
@@ -832,6 +728,7 @@ function helpCommand(): void {
     v0.4  Policy engine v2 (database rules) + zero-friction setup
     v0.5  Hot-reload + rate limiting
     v0.6  Web UI — approval, policy editor, log viewer
+    v0.7  Client visibility — Clients tab, see and manage everything
 
 `);
 }
