@@ -53,4 +53,5 @@ export interface McpProxyOptions {
   serverArgs:    string[];
   serverEnv?:    Record<string, string>;
   serverCwd?:    string;
+  port?:         number;
 }

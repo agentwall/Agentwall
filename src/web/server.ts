@@ -1,0 +1,309 @@
+import * as http from "node:http";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
+import { WebSocketServer, type WebSocket } from "ws";
+import yaml from "js-yaml";
+import type { ApprovalQueue } from "./approval.js";
+
+const VERSION = "0.6.0";
+const DEFAULT_PORT = 7823;
+
+const MIME_TYPES: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".js": "application/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".png": "image/png",
+  ".svg": "image/svg+xml",
+};
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+function resolveUiDir(): string {
+  const adjacent = path.join(__dirname, "ui");
+  if (fs.existsSync(adjacent)) return adjacent;
+  const fromDist = path.resolve(__dirname, "../../src/web/ui");
+  if (fs.existsSync(fromDist)) return fromDist;
+  return adjacent;
+}
+
+const UI_DIR = resolveUiDir();
+
+export type WebServerOptions = {
+  port?: number;
+  policyPath: string;
+  logDir: string;
+  approvalQueue: ApprovalQueue;
+};
+
+function readBody(req: http.IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
+    req.on("error", reject);
+  });
+}
+
+export class AgentWallWebServer {
+  private server: http.Server;
+  private wss: WebSocketServer;
+  private options: WebServerOptions;
+
+  constructor(options: WebServerOptions) {
+    this.options = options;
+    this.server = http.createServer((req, res) => this.handleRequest(req, res));
+    this.wss = new WebSocketServer({ server: this.server });
+    this.wss.on("connection", (ws) => this.handleWebSocket(ws));
+
+    options.approvalQueue.onNewApproval((approval) => {
+      this.broadcast({
+        type: "approval_request",
+        id: approval.id,
+        toolName: approval.toolName,
+        params: approval.params,
+        runtime: approval.runtime,
+        timestamp: approval.timestamp.toISOString(),
+      });
+    });
+
+    options.approvalQueue.onApprovalResolved((id, decision) => {
+      this.broadcast({ type: "approval_resolved", id, decision });
+    });
+  }
+
+  start(): Promise<void> {
+    return new Promise((resolve) => {
+      const port = this.options.port ?? DEFAULT_PORT;
+      this.server.listen(port, "127.0.0.1", () => {
+        resolve();
+      });
+    });
+  }
+
+  stop(): void {
+    this.wss.close();
+    this.server.close();
+  }
+
+  get port(): number {
+    return this.options.port ?? DEFAULT_PORT;
+  }
+
+  notifyPolicyReloaded(): void {
+    this.broadcast({ type: "policy_reloaded" });
+  }
+
+  notifyLogEntry(entry: unknown): void {
+    this.broadcast({ type: "log_entry", entry });
+  }
+
+  private broadcast(message: unknown): void {
+    const json = JSON.stringify(message);
+    for (const client of this.wss.clients) {
+      if (client.readyState === 1) {
+        client.send(json);
+      }
+    }
+  }
+
+  private handleWebSocket(ws: WebSocket): void {
+    const pending = this.options.approvalQueue.getPending();
+    for (const approval of pending) {
+      ws.send(
+        JSON.stringify({
+          type: "approval_request",
+          id: approval.id,
+          toolName: approval.toolName,
+          params: approval.params,
+          runtime: approval.runtime,
+          timestamp: approval.timestamp.toISOString(),
+        }),
+      );
+    }
+  }
+
+  private async handleRequest(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): Promise<void> {
+    const url = new URL(req.url ?? "/", `http://localhost`);
+    const pathname = url.pathname;
+
+    try {
+      if (req.method === "GET" && pathname === "/") {
+        this.serveStatic(res, "index.html");
+      } else if (req.method === "GET" && pathname === "/policy") {
+        this.serveStatic(res, "policy.html");
+      } else if (req.method === "GET" && pathname === "/log") {
+        this.serveStatic(res, "log.html");
+      } else if (req.method === "GET" && pathname === "/api/status") {
+        this.handleStatus(res);
+      } else if (req.method === "GET" && pathname === "/api/policy") {
+        this.handleGetPolicy(res);
+      } else if (req.method === "POST" && pathname === "/api/policy") {
+        await this.handlePostPolicy(req, res);
+      } else if (req.method === "GET" && pathname === "/api/log") {
+        this.handleGetLog(req, res);
+      } else if (req.method === "POST" && pathname.startsWith("/api/approve/")) {
+        await this.handleApprove(req, res, pathname);
+      } else {
+        res.statusCode = 404;
+        res.end(JSON.stringify({ error: "Not found" }));
+      }
+    } catch (err) {
+      res.statusCode = 500;
+      res.end(JSON.stringify({ error: String(err) }));
+    }
+  }
+
+  private serveStatic(res: http.ServerResponse, filename: string): void {
+    if (filename.includes("..")) {
+      res.statusCode = 403;
+      res.end("Forbidden");
+      return;
+    }
+
+    const filePath = path.join(UI_DIR, filename);
+    if (!filePath.startsWith(UI_DIR)) {
+      res.statusCode = 403;
+      res.end("Forbidden");
+      return;
+    }
+
+    if (!fs.existsSync(filePath)) {
+      res.statusCode = 404;
+      res.end("Not found");
+      return;
+    }
+
+    const ext = path.extname(filePath);
+    res.setHeader("Content-Type", MIME_TYPES[ext] ?? "application/octet-stream");
+    res.end(fs.readFileSync(filePath));
+  }
+
+  private handleStatus(res: http.ServerResponse): void {
+    const pending = this.options.approvalQueue.getPending();
+    res.setHeader("Content-Type", "application/json");
+    res.end(
+      JSON.stringify({
+        version: VERSION,
+        policyPath: this.options.policyPath,
+        logPath: this.options.logDir,
+        pendingApprovals: pending.length,
+      }),
+    );
+  }
+
+  private handleGetPolicy(res: http.ServerResponse): void {
+    res.setHeader("Content-Type", "application/json");
+    if (!fs.existsSync(this.options.policyPath)) {
+      res.end(JSON.stringify({ yaml: "", parsed: {} }));
+      return;
+    }
+    const raw = fs.readFileSync(this.options.policyPath, "utf-8");
+    let parsed: unknown = {};
+    try {
+      parsed = yaml.load(raw);
+    } catch {
+      // return raw even if parse fails
+    }
+    res.end(JSON.stringify({ yaml: raw, parsed }));
+  }
+
+  private async handlePostPolicy(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): Promise<void> {
+    const body = await readBody(req);
+    let payload: { yaml?: string };
+    try {
+      payload = JSON.parse(body);
+    } catch {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ error: "Invalid JSON" }));
+      return;
+    }
+
+    if (typeof payload.yaml !== "string") {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ error: "Missing yaml field" }));
+      return;
+    }
+
+    try {
+      yaml.load(payload.yaml);
+    } catch (err) {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ error: `Invalid YAML: ${String(err)}` }));
+      return;
+    }
+
+    fs.writeFileSync(this.options.policyPath, payload.yaml, "utf-8");
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ ok: true }));
+  }
+
+  private handleGetLog(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): void {
+    const url = new URL(req.url ?? "/", "http://localhost");
+    const date = url.searchParams.get("date") ?? new Date().toISOString().slice(0, 10);
+    const logPath = path.join(this.options.logDir, `session-${date}.jsonl`);
+
+    res.setHeader("Content-Type", "application/json");
+
+    if (!fs.existsSync(logPath)) {
+      res.end(JSON.stringify([]));
+      return;
+    }
+
+    const lines = fs.readFileSync(logPath, "utf-8").split("\n").filter(Boolean);
+    const entries = lines.map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return null;
+      }
+    }).filter(Boolean);
+
+    res.end(JSON.stringify(entries));
+  }
+
+  private async handleApprove(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    pathname: string,
+  ): Promise<void> {
+    const id = pathname.split("/").at(-1)!;
+    const body = await readBody(req);
+
+    let payload: { decision?: string };
+    try {
+      payload = JSON.parse(body);
+    } catch {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ error: "Invalid JSON" }));
+      return;
+    }
+
+    if (payload.decision !== "allow" && payload.decision !== "deny") {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ error: "decision must be 'allow' or 'deny'" }));
+      return;
+    }
+
+    const resolved = this.options.approvalQueue.decide(id, payload.decision);
+    res.setHeader("Content-Type", "application/json");
+
+    if (!resolved) {
+      res.statusCode = 404;
+      res.end(JSON.stringify({ error: "Approval not found or already resolved" }));
+      return;
+    }
+
+    res.end(JSON.stringify({ ok: true }));
+  }
+}

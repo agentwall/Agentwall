@@ -19,9 +19,11 @@ import { EventLogger } from "./core/logger.js";
 import { askUser, printDecision } from "./core/prompt.js";
 import { OpenClawAdapter } from "./adapters/openclaw/client.js";
 import { startProxy } from "./adapters/mcp/proxy.js";
+import { ApprovalQueue } from "./web/approval.js";
+import { AgentWallWebServer } from "./web/server.js";
 import type { ActionProposal, DecisionVerdict, DecisionReason, LogEntry } from "./core/types.js";
 
-const VERSION = "0.5.0";
+const VERSION = "0.6.0";
 const AGENTWALL_DIR = join(homedir(), ".agentwall");
 const LOCK_FILE = join(AGENTWALL_DIR, "agentwall.lock");
 
@@ -757,6 +759,55 @@ function statusCommand(): void {
   process.stdout.write(`  Run \`agentwall undo\` to remove AgentWall from all configs.\n\n`);
 }
 
+async function uiCommand(args: string[]): Promise<void> {
+  const flags = parseFlags(args);
+  const port = flags.port ? parseInt(flags.port, 10) : 7823;
+
+  const approvalQueue = new ApprovalQueue();
+  const policy = new PolicyEngine();
+  const logger = new EventLogger();
+
+  const webServer = new AgentWallWebServer({
+    port,
+    policyPath: policy.policyPath,
+    logDir: logger.logDir,
+    approvalQueue,
+  });
+
+  policy.watch((filePath) => {
+    process.stderr.write(`[AgentWall] Policy reloaded: ${filePath}\n`);
+    webServer.notifyPolicyReloaded();
+  });
+
+  await webServer.start();
+
+  const url = `http://localhost:${port}`;
+  process.stderr.write(`\n  agentwall v${VERSION} — web UI\n`);
+  process.stderr.write(`  ${GREEN}✓${RESET} Web UI available at ${url}\n\n`);
+
+  const os = platform();
+  try {
+    if (os === "darwin") {
+      execSync(`open ${url}`, { stdio: "ignore" });
+    } else if (os === "win32") {
+      execSync(`start ${url}`, { stdio: "ignore" });
+    } else {
+      execSync(`xdg-open ${url}`, { stdio: "ignore" });
+    }
+  } catch {
+    // browser open is best-effort
+  }
+
+  const shutdown = () => {
+    policy.stopWatch();
+    webServer.stop();
+    logger.close();
+    process.exit(0);
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+}
+
 function helpCommand(): void {
   process.stdout.write(`
   agentwall v${VERSION} — policy-enforcing MCP proxy for AI agents
@@ -766,6 +817,7 @@ function helpCommand(): void {
     agentwall setup <runtime>            Print manual setup instructions (openclaw, mcp)
     agentwall undo                       Restore all original MCP configs
     agentwall proxy -- <command> [args]  Wrap a single MCP server
+    agentwall ui [--port 7823]           Start the web UI (policy editor, log viewer)
     agentwall init                       Create ~/.agentwall/policy.yaml with default rules
     agentwall status                     Show protection status
     agentwall replay [N]                 Show last N log entries (default 50)
@@ -779,6 +831,7 @@ function helpCommand(): void {
     v0.3  Everything MCP-speaking via protocol-level proxy
     v0.4  Policy engine v2 (database rules) + zero-friction setup
     v0.5  Hot-reload + rate limiting
+    v0.6  Web UI — approval, policy editor, log viewer
 
 `);
 }
@@ -818,6 +871,9 @@ const remaining = process.argv.slice(3);
       break;
     case "status":
       statusCommand();
+      break;
+    case "ui":
+      await uiCommand(remaining);
       break;
     case "--version":
     case "-v":

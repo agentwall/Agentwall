@@ -38,8 +38,8 @@ Requires Node.js >= 22.
 | Windsurf | Supported |
 | Any MCP client | Supported |
 
-**In GUI clients** (Cursor, Claude Desktop): policy-only mode.
-Rules auto-allow and auto-block. No interactive prompt needed.
+**In GUI clients** (Cursor, Claude Desktop): web-based approval.
+Rules auto-allow and auto-block. `ask` rules show in the browser UI.
 
 **In terminal clients** (Claude Code): full interactive approval.
 You see every tool call and decide in real time.
@@ -131,6 +131,28 @@ allow:
   - path: workspace/**
 ```
 
+## Web UI
+
+AgentWall includes a local web UI for clients that don't have a terminal
+(Cursor, Claude Desktop).
+
+It starts automatically when needed, or run it manually:
+
+```bash
+agentwall ui
+# -> Web UI available at http://localhost:7823
+```
+
+**Approval page** (`/`) -- approve or deny tool calls from your browser.
+Auto-denies after 30 seconds if no response.
+
+**Policy editor** (`/policy`) -- edit your rules visually or in raw YAML.
+Both modes edit the same file. Changes apply instantly.
+
+**Log viewer** (`/log`) -- searchable view of everything your agent has done.
+
+The web UI is localhost-only. No auth, no external connections.
+
 ## Commands
 
 ```
@@ -138,6 +160,7 @@ agentwall setup [--dry-run]          Auto-detect and wrap all MCP configs
 agentwall setup <runtime>            Print manual setup instructions
 agentwall undo                       Restore all original MCP configs
 agentwall proxy -- <command> [args]  Wrap a single MCP server
+agentwall ui [--port 7823]           Start the web UI
 agentwall init                       Create default policy
 agentwall status                     Show protection status
 agentwall replay [N]                 Show recent audit log entries
@@ -227,6 +250,7 @@ AgentWall and OS isolation are complementary, not alternatives.
 | v0.3 | Everything MCP-speaking | Protocol-level MCP proxy |
 | v0.4 | Same + database rules | Policy engine v2 + zero-friction setup |
 | v0.5 | Same + rate limiting | Hot-reload + rate limiting |
+| v0.6 | Same + web UI | Approval UI, policy editor, log viewer |
 
 ## License
 

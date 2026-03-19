@@ -1,0 +1,766 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgentWall — Policy Editor</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: #0f1117;
+    color: #e1e4e8;
+    min-height: 100vh;
+  }
+  a { color: #58a6ff; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  .nav {
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+    padding: 0.75rem 1.5rem;
+    background: #161b22;
+    border-bottom: 1px solid #30363d;
+  }
+  .nav-brand {
+    font-weight: 700;
+    font-size: 1rem;
+    color: #e1e4e8;
+    margin-right: auto;
+  }
+  .nav a { font-size: 0.875rem; }
+  .nav-active { color: #e1e4e8; font-weight: 600; }
+
+  .status-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #3fb950;
+    margin-left: 0.5rem;
+  }
+  .status-dot.disconnected { background: #f85149; }
+
+  .container {
+    max-width: 800px;
+    margin: 1.5rem auto;
+    padding: 0 1rem;
+  }
+
+  .toolbar {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+  }
+  .tab-btn {
+    padding: 0.5rem 1rem;
+    background: transparent;
+    color: #8b949e;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .tab-btn.active {
+    background: #161b22;
+    color: #e1e4e8;
+    border-color: #58a6ff;
+  }
+  .toolbar-spacer { flex: 1; }
+
+  .btn-save {
+    padding: 0.5rem 1.25rem;
+    background: #238636;
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .btn-save:hover { opacity: 0.85; }
+  .btn-save:disabled { opacity: 0.4; cursor: default; }
+
+  .save-status {
+    font-size: 0.75rem;
+    color: #3fb950;
+    margin-right: 0.5rem;
+    opacity: 0;
+    transition: opacity 0.3s;
+  }
+  .save-status.visible { opacity: 1; }
+  .save-status.error { color: #f85149; }
+
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
+
+  /* YAML tab */
+  .yaml-editor {
+    width: 100%;
+    min-height: 500px;
+    background: #0d1117;
+    color: #c9d1d9;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    padding: 1rem;
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    font-size: 0.8125rem;
+    line-height: 1.5;
+    resize: vertical;
+    outline: none;
+    tab-size: 2;
+  }
+  .yaml-editor:focus { border-color: #58a6ff; }
+
+  .yaml-footer {
+    display: flex;
+    gap: 1.5rem;
+    margin-top: 0.5rem;
+    font-size: 0.75rem;
+    color: #8b949e;
+  }
+
+  /* Visual tab */
+  .section {
+    margin-bottom: 1.5rem;
+  }
+  .section-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid #30363d;
+    margin-bottom: 0.5rem;
+  }
+  .section-title {
+    font-weight: 700;
+    font-size: 0.8125rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .section-title.deny { color: #f85149; }
+  .section-title.ask { color: #d29922; }
+  .section-title.allow { color: #3fb950; }
+  .section-title.limits { color: #58a6ff; }
+  .section-desc {
+    font-size: 0.6875rem;
+    color: #8b949e;
+  }
+
+  .rule-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.375rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.8125rem;
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  }
+  .rule-row:hover { background: #161b22; }
+  .rule-text { flex: 1; word-break: break-all; }
+
+  .btn-remove {
+    background: transparent;
+    color: #8b949e;
+    border: 1px solid #30363d;
+    border-radius: 4px;
+    padding: 0.125rem 0.5rem;
+    font-size: 0.6875rem;
+    cursor: pointer;
+  }
+  .btn-remove:hover { color: #f85149; border-color: #f85149; }
+
+  .btn-add {
+    background: transparent;
+    color: #58a6ff;
+    border: 1px solid #30363d;
+    border-radius: 4px;
+    padding: 0.25rem 0.75rem;
+    font-size: 0.75rem;
+    cursor: pointer;
+    margin-top: 0.25rem;
+  }
+  .btn-add:hover { border-color: #58a6ff; }
+
+  /* Inline add form */
+  .add-form {
+    display: none;
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    padding: 0.75rem;
+    margin-top: 0.5rem;
+  }
+  .add-form.visible { display: block; }
+
+  .add-form-row {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .add-form select, .add-form input {
+    background: #0d1117;
+    color: #e1e4e8;
+    border: 1px solid #30363d;
+    border-radius: 4px;
+    padding: 0.375rem 0.5rem;
+    font-size: 0.8125rem;
+    outline: none;
+  }
+  .add-form input { flex: 1; min-width: 120px; }
+  .add-form select:focus, .add-form input:focus { border-color: #58a6ff; }
+
+  .add-form-actions {
+    display: flex;
+    gap: 0.5rem;
+    justify-content: flex-end;
+  }
+  .btn-form {
+    padding: 0.375rem 0.75rem;
+    border: 1px solid #30363d;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    cursor: pointer;
+    background: transparent;
+    color: #e1e4e8;
+  }
+  .btn-form.primary {
+    background: #238636;
+    border-color: #238636;
+    color: #fff;
+  }
+  .btn-form:hover { opacity: 0.85; }
+
+  /* Limit form */
+  .limit-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.375rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.8125rem;
+  }
+  .limit-row:hover { background: #161b22; }
+  .limit-label { color: #8b949e; font-size: 0.75rem; }
+  .limit-value {
+    background: #0d1117;
+    color: #e1e4e8;
+    border: 1px solid #30363d;
+    border-radius: 4px;
+    padding: 0.25rem 0.375rem;
+    font-size: 0.8125rem;
+    width: 60px;
+    text-align: center;
+    outline: none;
+    font-family: "SFMono-Regular", Consolas, monospace;
+  }
+  .limit-value:focus { border-color: #58a6ff; }
+  .limit-tool {
+    font-family: "SFMono-Regular", Consolas, monospace;
+    color: #c9d1d9;
+    min-width: 60px;
+  }
+
+  .parse-error {
+    background: #2d1215;
+    border: 1px solid #f85149;
+    border-radius: 6px;
+    padding: 0.75rem 1rem;
+    font-size: 0.8125rem;
+    color: #f85149;
+    margin-bottom: 1rem;
+    display: none;
+  }
+  .parse-error.visible { display: block; }
+</style>
+</head>
+<body>
+
+<nav class="nav">
+  <span class="nav-brand">AgentWall</span>
+  <a href="/">Approval</a>
+  <a href="/policy" class="nav-active">Policy</a>
+  <a href="/log">Log</a>
+  <span class="status-dot" id="statusDot"></span>
+</nav>
+
+<div class="container">
+  <div class="toolbar">
+    <button class="tab-btn active" id="tabVisual" onclick="switchTab('visual')">Visual</button>
+    <button class="tab-btn" id="tabYaml" onclick="switchTab('yaml')">YAML</button>
+    <div class="toolbar-spacer"></div>
+    <span class="save-status" id="saveStatus"></span>
+    <button class="btn-save" id="btnSave" onclick="savePolicy()">Save</button>
+  </div>
+
+  <div class="parse-error" id="parseError"></div>
+
+  <div class="tab-content active" id="contentVisual"></div>
+
+  <div class="tab-content" id="contentYaml">
+    <textarea class="yaml-editor" id="yamlEditor" spellcheck="false"></textarea>
+    <div class="yaml-footer">
+      <span id="lastSaved"></span>
+      <span>Hot-reload: active</span>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  var currentTab = "visual";
+  var policyData = { deny: [], ask: [], allow: [], limits: [] };
+  var dirty = false;
+  var ws = null;
+
+  window.addEventListener("beforeunload", function (e) {
+    if (dirty) { e.preventDefault(); e.returnValue = ""; }
+  });
+
+  function connect() {
+    var proto = location.protocol === "https:" ? "wss:" : "ws:";
+    ws = new WebSocket(proto + "//" + location.host + "/ws");
+    ws.onopen = function () {
+      document.getElementById("statusDot").classList.remove("disconnected");
+    };
+    ws.onclose = function () {
+      document.getElementById("statusDot").classList.add("disconnected");
+      setTimeout(connect, 2000);
+    };
+    ws.onmessage = function (event) {
+      var msg = JSON.parse(event.data);
+      if (msg.type === "policy_reloaded" && !dirty) {
+        loadPolicy();
+      }
+    };
+  }
+
+  function loadPolicy() {
+    fetch("/api/policy")
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        var parsed = data.parsed || {};
+        policyData = {
+          deny: Array.isArray(parsed.deny) ? parsed.deny : [],
+          ask: Array.isArray(parsed.ask) ? parsed.ask : [],
+          allow: Array.isArray(parsed.allow) ? parsed.allow : [],
+          limits: Array.isArray(parsed.limits) ? parsed.limits : [],
+        };
+        document.getElementById("yamlEditor").value = data.yaml || "";
+        renderVisual();
+        dirty = false;
+      });
+  }
+
+  function markDirty() {
+    dirty = true;
+  }
+
+  // --- Tab switching ---
+
+  window.switchTab = function (tab) {
+    var errEl = document.getElementById("parseError");
+    errEl.classList.remove("visible");
+
+    if (tab === "yaml" && currentTab === "visual") {
+      document.getElementById("yamlEditor").value = serializeToYaml();
+    }
+
+    if (tab === "visual" && currentTab === "yaml") {
+      var yamlStr = document.getElementById("yamlEditor").value;
+      try {
+        var parsed = parseYaml(yamlStr);
+        policyData = parsed;
+        renderVisual();
+      } catch (e) {
+        errEl.textContent = "Invalid YAML \u2014 fix errors before switching: " + e.message;
+        errEl.classList.add("visible");
+        return;
+      }
+    }
+
+    currentTab = tab;
+    document.getElementById("tabVisual").classList.toggle("active", tab === "visual");
+    document.getElementById("tabYaml").classList.toggle("active", tab === "yaml");
+    document.getElementById("contentVisual").classList.toggle("active", tab === "visual");
+    document.getElementById("contentYaml").classList.toggle("active", tab === "yaml");
+  };
+
+  // --- YAML serialization ---
+
+  function parseYaml(str) {
+    // Minimal YAML parser using the server's response for validation,
+    // but for client-side we do a basic parse via JSON round-trip of
+    // the known structure. We'll validate server-side on save.
+    // For tab switching, we use a simple line-based parser.
+    var result = { deny: [], ask: [], allow: [], limits: [] };
+    var currentSection = null;
+    var currentRule = null;
+    var lines = str.split("\n");
+
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      var trimmed = line.replace(/#.*$/, "").trimEnd();
+
+      if (trimmed === "") continue;
+
+      var topMatch = trimmed.match(/^(deny|ask|allow|limits)\s*:/);
+      if (topMatch) {
+        if (currentRule && currentSection) {
+          result[currentSection].push(currentRule);
+        }
+        currentSection = topMatch[1];
+        currentRule = null;
+        continue;
+      }
+
+      if (!currentSection) continue;
+
+      var dashMatch = trimmed.match(/^\s+-\s+(.*)/);
+      if (dashMatch) {
+        if (currentRule && currentSection) {
+          result[currentSection].push(currentRule);
+        }
+        currentRule = {};
+        var rest = dashMatch[1];
+        var kvMatch = rest.match(/^(\w+)\s*:\s*(.*)/);
+        if (kvMatch) {
+          var key = kvMatch[1];
+          var val = kvMatch[2].replace(/^["']|["']$/g, "");
+          if (currentSection === "limits" && (key === "max" || key === "window")) {
+            currentRule[key] = parseInt(val, 10);
+          } else {
+            currentRule[key] = val;
+          }
+        }
+        continue;
+      }
+
+      var contMatch = trimmed.match(/^\s+(\w+)\s*:\s*(.*)/);
+      if (contMatch && currentRule) {
+        var cKey = contMatch[1];
+        var cVal = contMatch[2].replace(/^["']|["']$/g, "");
+
+        if (cKey === "match") {
+          currentRule.match = currentRule.match || {};
+        } else if (currentRule.match !== undefined && Object.keys(currentRule).indexOf("match") >= 0 && !["command", "path", "tool", "url", "max", "window"].includes(cKey)) {
+          currentRule.match = currentRule.match || {};
+          currentRule.match[cKey] = cVal;
+        } else if (currentSection === "limits" && (cKey === "max" || cKey === "window")) {
+          currentRule[cKey] = parseInt(cVal, 10);
+        } else {
+          currentRule[cKey] = cVal;
+        }
+        continue;
+      }
+    }
+
+    if (currentRule && currentSection) {
+      result[currentSection].push(currentRule);
+    }
+
+    return result;
+  }
+
+  function quoteYaml(val) {
+    if (!val) return '""';
+    if (/[:#\[\]{}&*!|>',@`]/.test(val) || val.indexOf(" ") >= 0 && val.indexOf("*") >= 0) {
+      return '"' + val.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
+    }
+    return val;
+  }
+
+  function serializeToYaml() {
+    var lines = ["# AgentWall Policy", ""];
+
+    if (policyData.deny.length > 0) {
+      lines.push("deny:");
+      for (var i = 0; i < policyData.deny.length; i++) {
+        serializeRule(lines, policyData.deny[i]);
+      }
+      lines.push("");
+    }
+
+    if (policyData.ask.length > 0) {
+      lines.push("ask:");
+      for (var i = 0; i < policyData.ask.length; i++) {
+        serializeRule(lines, policyData.ask[i]);
+      }
+      lines.push("");
+    }
+
+    if (policyData.allow.length > 0) {
+      lines.push("allow:");
+      for (var i = 0; i < policyData.allow.length; i++) {
+        serializeRule(lines, policyData.allow[i]);
+      }
+      lines.push("");
+    }
+
+    if (policyData.limits.length > 0) {
+      lines.push("limits:");
+      for (var i = 0; i < policyData.limits.length; i++) {
+        var lim = policyData.limits[i];
+        lines.push("  - tool: " + (lim.tool || "*"));
+        lines.push("    max: " + (lim.max || 0));
+        lines.push("    window: " + (lim.window || 0));
+      }
+      lines.push("");
+    }
+
+    return lines.join("\n") + "\n";
+  }
+
+  function serializeRule(lines, rule) {
+    var keys = Object.keys(rule).filter(function (k) { return k !== "match"; });
+    if (keys.length === 0 && !rule.match) return;
+
+    var first = true;
+    for (var j = 0; j < keys.length; j++) {
+      var prefix = first ? "  - " : "    ";
+      lines.push(prefix + keys[j] + ": " + quoteYaml(rule[keys[j]]));
+      first = false;
+    }
+
+    if (rule.match) {
+      var prefix = first ? "  - " : "    ";
+      lines.push(prefix + "match:");
+      first = false;
+      var matchKeys = Object.keys(rule.match);
+      for (var k = 0; k < matchKeys.length; k++) {
+        lines.push("      " + matchKeys[k] + ": " + quoteYaml(rule.match[matchKeys[k]]));
+      }
+    }
+  }
+
+  // --- Visual rendering ---
+
+  function renderVisual() {
+    var container = document.getElementById("contentVisual");
+    var html = "";
+
+    html += renderSection("deny", "Blocked automatically, no prompt", policyData.deny);
+    html += renderSection("ask", "Prompts for approval", policyData.ask);
+    html += renderSection("allow", "Permitted automatically", policyData.allow);
+    html += renderLimitsSection(policyData.limits);
+
+    container.innerHTML = html;
+  }
+
+  function ruleToText(rule) {
+    var parts = [];
+    if (rule.command) parts.push("command  " + rule.command);
+    if (rule.path) parts.push("path  " + rule.path);
+    if (rule.tool) parts.push("tool  " + rule.tool);
+    if (rule.url) parts.push("url  " + rule.url);
+    if (rule.match) {
+      var matchParts = [];
+      for (var k in rule.match) {
+        matchParts.push(k + " = " + rule.match[k]);
+      }
+      if (matchParts.length > 0) parts.push("match  " + matchParts.join(", "));
+    }
+    return parts.join("  &middot;  ") || "(empty rule)";
+  }
+
+  function renderSection(section, description, rules) {
+    var html = '<div class="section">';
+    html += '<div class="section-header">';
+    html += '<span class="section-title ' + section + '">' + section.toUpperCase() + '</span>';
+    html += '<span class="section-desc">\u2014 ' + escapeHtml(description) + '</span>';
+    html += '</div>';
+
+    for (var i = 0; i < rules.length; i++) {
+      html += '<div class="rule-row">';
+      html += '<span class="rule-text">' + ruleToText(rules[i]) + '</span>';
+      html += '<button class="btn-remove" onclick="removeRule(\'' + section + '\',' + i + ')">remove</button>';
+      html += '</div>';
+    }
+
+    html += '<button class="btn-add" onclick="showAddForm(\'' + section + '\')">+ add rule</button>';
+    html += '<div class="add-form" id="addForm-' + section + '">';
+    html += renderAddForm(section);
+    html += '</div>';
+    html += '</div>';
+    return html;
+  }
+
+  function renderAddForm(section) {
+    var html = '';
+    html += '<div class="add-form-row">';
+    html += '<select id="addType-' + section + '">';
+    html += '<option value="command">command</option>';
+    html += '<option value="path">path</option>';
+    html += '<option value="tool">tool</option>';
+    html += '<option value="url">url</option>';
+    html += '</select>';
+    html += '<input type="text" id="addValue-' + section + '" placeholder="glob pattern (e.g. ~/.ssh/**)">';
+    html += '</div>';
+    html += '<div class="add-form-row">';
+    html += '<span style="font-size:0.75rem;color:#8b949e;">Optional match:</span>';
+    html += '<input type="text" id="addMatchKey-' + section + '" placeholder="arg name (e.g. sql)" style="max-width:120px">';
+    html += '<span style="color:#8b949e">=</span>';
+    html += '<input type="text" id="addMatchVal-' + section + '" placeholder="pattern (e.g. drop *)">';
+    html += '</div>';
+    html += '<div class="add-form-actions">';
+    html += '<button class="btn-form" onclick="hideAddForm(\'' + section + '\')">Cancel</button>';
+    html += '<button class="btn-form primary" onclick="addRule(\'' + section + '\')">Add</button>';
+    html += '</div>';
+    return html;
+  }
+
+  function renderLimitsSection(limits) {
+    var html = '<div class="section">';
+    html += '<div class="section-header">';
+    html += '<span class="section-title limits">RATE LIMITS</span>';
+    html += '</div>';
+
+    for (var i = 0; i < limits.length; i++) {
+      var lim = limits[i];
+      html += '<div class="limit-row">';
+      html += '<span class="limit-tool">' + escapeHtml(lim.tool || "*") + '</span>';
+      html += '<span class="limit-label">max</span>';
+      html += '<input type="number" class="limit-value" value="' + (lim.max || 0) + '" onchange="updateLimit(' + i + ',\'max\',this.value)">';
+      html += '<span class="limit-label">per</span>';
+      html += '<input type="number" class="limit-value" value="' + (lim.window || 0) + '" onchange="updateLimit(' + i + ',\'window\',this.value)">';
+      html += '<span class="limit-label">seconds</span>';
+      html += '<button class="btn-remove" onclick="removeLimit(' + i + ')">remove</button>';
+      html += '</div>';
+    }
+
+    html += '<button class="btn-add" onclick="showAddForm(\'limits\')">+ add limit</button>';
+    html += '<div class="add-form" id="addForm-limits">';
+    html += '<div class="add-form-row">';
+    html += '<input type="text" id="addLimitTool" placeholder="tool name (e.g. exec, write, *)">';
+    html += '<span class="limit-label">max</span>';
+    html += '<input type="number" id="addLimitMax" placeholder="30" style="max-width:80px">';
+    html += '<span class="limit-label">per</span>';
+    html += '<input type="number" id="addLimitWindow" placeholder="60" style="max-width:80px">';
+    html += '<span class="limit-label">seconds</span>';
+    html += '</div>';
+    html += '<div class="add-form-actions">';
+    html += '<button class="btn-form" onclick="hideAddForm(\'limits\')">Cancel</button>';
+    html += '<button class="btn-form primary" onclick="addLimit()">Add</button>';
+    html += '</div>';
+    html += '</div>';
+    html += '</div>';
+    return html;
+  }
+
+  // --- Actions ---
+
+  window.removeRule = function (section, index) {
+    policyData[section].splice(index, 1);
+    renderVisual();
+    markDirty();
+  };
+
+  window.showAddForm = function (section) {
+    document.getElementById("addForm-" + section).classList.add("visible");
+  };
+
+  window.hideAddForm = function (section) {
+    document.getElementById("addForm-" + section).classList.remove("visible");
+  };
+
+  window.addRule = function (section) {
+    var type = document.getElementById("addType-" + section).value;
+    var value = document.getElementById("addValue-" + section).value.trim();
+    var matchKey = document.getElementById("addMatchKey-" + section).value.trim();
+    var matchVal = document.getElementById("addMatchVal-" + section).value.trim();
+
+    if (!value && !matchKey) return;
+
+    var rule = {};
+    if (value) rule[type] = value;
+    if (matchKey && matchVal) {
+      rule.match = {};
+      rule.match[matchKey] = matchVal;
+    }
+
+    policyData[section].push(rule);
+    renderVisual();
+    markDirty();
+  };
+
+  window.removeLimit = function (index) {
+    policyData.limits.splice(index, 1);
+    renderVisual();
+    markDirty();
+  };
+
+  window.updateLimit = function (index, field, value) {
+    policyData.limits[index][field] = parseInt(value, 10) || 0;
+    markDirty();
+  };
+
+  window.addLimit = function () {
+    var tool = document.getElementById("addLimitTool").value.trim();
+    var max = parseInt(document.getElementById("addLimitMax").value, 10);
+    var windowSec = parseInt(document.getElementById("addLimitWindow").value, 10);
+
+    if (!tool || isNaN(max) || isNaN(windowSec)) return;
+
+    policyData.limits.push({ tool: tool, max: max, window: windowSec });
+    renderVisual();
+    markDirty();
+  };
+
+  // --- Save ---
+
+  window.savePolicy = function () {
+    var yamlStr;
+    if (currentTab === "yaml") {
+      yamlStr = document.getElementById("yamlEditor").value;
+    } else {
+      yamlStr = serializeToYaml();
+    }
+
+    var statusEl = document.getElementById("saveStatus");
+    var btnEl = document.getElementById("btnSave");
+    btnEl.disabled = true;
+
+    fetch("/api/policy", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ yaml: yamlStr }),
+    })
+      .then(function (r) {
+        if (!r.ok) return r.json().then(function (d) { throw new Error(d.error || "Save failed"); });
+        return r.json();
+      })
+      .then(function () {
+        statusEl.textContent = "Saved";
+        statusEl.className = "save-status visible";
+        document.getElementById("lastSaved").textContent = "Last saved: " + new Date().toLocaleTimeString();
+        dirty = false;
+        setTimeout(function () { statusEl.classList.remove("visible"); }, 2000);
+      })
+      .catch(function (err) {
+        statusEl.textContent = err.message;
+        statusEl.className = "save-status visible error";
+        setTimeout(function () { statusEl.classList.remove("visible"); }, 4000);
+      })
+      .finally(function () {
+        btnEl.disabled = false;
+      });
+  };
+
+  document.getElementById("yamlEditor").addEventListener("input", markDirty);
+
+  function escapeHtml(str) {
+    if (!str) return "";
+    return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+
+  loadPolicy();
+  connect();
+})();
+</script>
+</body>
+</html>

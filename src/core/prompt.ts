@@ -2,6 +2,7 @@ import { createInterface } from "node:readline";
 import { openSync, createReadStream } from "node:fs";
 import type { Readable } from "node:stream";
 import type { ActionProposal } from "./types.js";
+import type { ApprovalQueue } from "../web/approval.js";
 
 const AUTO_DENY_TIMEOUT_MS = 5 * 60 * 1000;
 
@@ -16,6 +17,12 @@ const sessionMemory = new Set<string>();
 
 let inputMode: "stdin" | "tty" = "stdin";
 let ttyAvailable: boolean | null = null;
+
+let _webApprovalQueue: ApprovalQueue | null = null;
+
+export function setWebApprovalQueue(queue: ApprovalQueue): void {
+  _webApprovalQueue = queue;
+}
 
 /**
  * Switch prompt input to /dev/tty. Required in proxy mode where
@@ -146,6 +153,15 @@ export async function askUser(
   const baseExec = getBaseExecutable(proposal.command);
   if (sessionMemory.has(baseExec)) {
     return "allow";
+  }
+
+  if (inputMode === "tty" && !isTtyAvailable() && _webApprovalQueue) {
+    const decision = await _webApprovalQueue.request(
+      proposal.toolName ?? proposal.command,
+      proposal.args ?? {},
+      proposal.runtime,
+    );
+    return decision;
   }
 
   return new Promise((resolve) => {

@@ -18,9 +18,12 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import type { ServerCapabilities } from "@modelcontextprotocol/sdk/types.js";
 
+import { openSync, closeSync } from "node:fs";
 import { PolicyEngine } from "../../core/policy.js";
 import { EventLogger } from "../../core/logger.js";
-import { askUser, printDecision, useTtyInput } from "../../core/prompt.js";
+import { askUser, printDecision, useTtyInput, setWebApprovalQueue } from "../../core/prompt.js";
+import { ApprovalQueue } from "../../web/approval.js";
+import { AgentWallWebServer } from "../../web/server.js";
 import type {
   ActionProposal,
   DecisionVerdict,
@@ -29,7 +32,7 @@ import type {
   McpProxyOptions,
 } from "../../core/types.js";
 
-const VERSION = "0.5.0";
+const VERSION = "0.6.0";
 
 const GREEN = "\x1b[32m";
 const RED = "\x1b[31m";
@@ -74,15 +77,58 @@ function buildLogEntry(
   };
 }
 
+function checkTtyAvailable(): boolean {
+  try {
+    const fd = openSync("/dev/tty", "r");
+    closeSync(fd);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function startProxy(options: McpProxyOptions): Promise<void> {
   useTtyInput();
 
+  const hasTty = checkTtyAvailable();
+  let webServer: AgentWallWebServer | null = null;
+  let approvalQueue: ApprovalQueue | null = null;
+
+  if (!hasTty) {
+    approvalQueue = new ApprovalQueue();
+    setWebApprovalQueue(approvalQueue);
+  }
+
+  const logger = new EventLogger(
+    approvalQueue
+      ? {
+          onEntry: (entry) => {
+            webServer?.notifyLogEntry(entry);
+          },
+        }
+      : undefined,
+  );
+
   const policy = new PolicyEngine();
-  const logger = new EventLogger();
 
   policy.watch((filePath) => {
     process.stderr.write(`[AgentWall] Policy reloaded: ${filePath}\n`);
+    webServer?.notifyPolicyReloaded();
   });
+
+  if (!hasTty && approvalQueue) {
+    const envPort = parseInt(process.env.AGENTWALL_PORT ?? "", 10) || 7823;
+    const port = options.port ?? envPort;
+    webServer = new AgentWallWebServer({
+      port,
+      policyPath: policy.policyPath,
+      logDir: logger.logDir,
+      approvalQueue,
+    });
+    await webServer.start();
+    process.stderr.write(`[AgentWall] Web UI available at http://localhost:${port}\n`);
+    process.stderr.write(`[AgentWall] Approval requests will appear in your browser.\n`);
+  }
 
   process.stderr.write(
     `\n  agentwall v${VERSION} — MCP proxy mode\n`,
@@ -297,6 +343,7 @@ export async function startProxy(options: McpProxyOptions): Promise<void> {
   const shutdown = () => {
     process.stderr.write(`\n  ${DIM}shutting down...${RESET}\n`);
     policy.stopWatch();
+    webServer?.stop();
     logger.close();
     client.close().catch(() => {});
     server.close().catch(() => {});

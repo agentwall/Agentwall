@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgentWall — Approval</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: #0f1117;
+    color: #e1e4e8;
+    min-height: 100vh;
+  }
+  a { color: #58a6ff; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  .nav {
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+    padding: 0.75rem 1.5rem;
+    background: #161b22;
+    border-bottom: 1px solid #30363d;
+  }
+  .nav-brand {
+    font-weight: 700;
+    font-size: 1rem;
+    color: #e1e4e8;
+    margin-right: auto;
+  }
+  .nav a { font-size: 0.875rem; }
+  .nav-active { color: #e1e4e8; font-weight: 600; }
+
+  .status-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #3fb950;
+    margin-left: 0.5rem;
+    vertical-align: middle;
+  }
+  .status-dot.disconnected { background: #f85149; }
+
+  .container {
+    max-width: 640px;
+    margin: 2rem auto;
+    padding: 0 1rem;
+  }
+
+  .empty-state {
+    text-align: center;
+    padding: 4rem 1rem;
+    color: #8b949e;
+  }
+  .empty-state h2 {
+    font-size: 1.25rem;
+    color: #e1e4e8;
+    margin-bottom: 0.5rem;
+  }
+  .empty-state p { margin-bottom: 1.5rem; }
+  .empty-links { display: flex; gap: 1rem; justify-content: center; }
+
+  .approval-card {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    padding: 1.5rem;
+    display: none;
+  }
+  .approval-card.visible { display: block; }
+
+  .card-header {
+    font-size: 1.125rem;
+    font-weight: 600;
+    margin-bottom: 1.25rem;
+    color: #f0883e;
+  }
+
+  .field { margin-bottom: 0.75rem; }
+  .field-label {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #8b949e;
+    margin-bottom: 0.25rem;
+  }
+  .field-value {
+    font-size: 0.9375rem;
+    word-break: break-all;
+  }
+
+  .args-block {
+    background: #0d1117;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    padding: 0.75rem 1rem;
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    font-size: 0.8125rem;
+    white-space: pre-wrap;
+    word-break: break-all;
+    max-height: 240px;
+    overflow-y: auto;
+    color: #c9d1d9;
+  }
+
+  .countdown {
+    text-align: center;
+    color: #8b949e;
+    font-size: 0.875rem;
+    margin: 1.25rem 0;
+  }
+  .countdown.urgent { color: #f85149; font-weight: 600; }
+
+  .actions {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-top: 1.25rem;
+  }
+  .btn {
+    flex: 1;
+    padding: 0.625rem 1rem;
+    border: none;
+    border-radius: 6px;
+    font-size: 0.9375rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.15s;
+  }
+  .btn:hover { opacity: 0.85; }
+  .btn:disabled { opacity: 0.4; cursor: default; }
+  .btn-deny {
+    background: #da3633;
+    color: #fff;
+  }
+  .btn-approve {
+    background: #238636;
+    color: #fff;
+  }
+
+  .pending-count {
+    text-align: center;
+    color: #8b949e;
+    font-size: 0.8125rem;
+    margin-top: 1rem;
+  }
+</style>
+</head>
+<body>
+
+<nav class="nav">
+  <span class="nav-brand">AgentWall</span>
+  <a href="/" class="nav-active">Approval</a>
+  <a href="/policy">Policy</a>
+  <a href="/log">Log</a>
+  <span class="status-dot" id="statusDot" title="Connected"></span>
+</nav>
+
+<div class="container">
+  <div id="emptyState" class="empty-state">
+    <h2>No pending approvals</h2>
+    <p>Approval requests from your agents will appear here.</p>
+    <div class="empty-links">
+      <a href="/policy">Policy Editor</a>
+      <a href="/log">View Logs</a>
+    </div>
+  </div>
+
+  <div id="approvalCard" class="approval-card">
+    <div class="card-header">Approval Request</div>
+
+    <div class="field">
+      <div class="field-label">Tool</div>
+      <div class="field-value" id="toolName"></div>
+    </div>
+    <div class="field">
+      <div class="field-label">Runtime</div>
+      <div class="field-value" id="runtime"></div>
+    </div>
+    <div class="field">
+      <div class="field-label">Time</div>
+      <div class="field-value" id="timestamp"></div>
+    </div>
+    <div class="field">
+      <div class="field-label">Arguments</div>
+      <div class="args-block" id="args"></div>
+    </div>
+
+    <div class="countdown" id="countdown"></div>
+
+    <div class="actions">
+      <button class="btn btn-deny" id="btnDeny" onclick="decide('deny')">Deny</button>
+      <button class="btn btn-approve" id="btnApprove" onclick="decide('allow')">Approve</button>
+    </div>
+
+    <div class="pending-count" id="pendingCount"></div>
+  </div>
+</div>
+
+<script>
+(function () {
+  const TIMEOUT_SECONDS = 30;
+  let queue = [];
+  let currentId = null;
+  let countdownInterval = null;
+  let ws = null;
+
+  function connect() {
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    ws = new WebSocket(proto + "//" + location.host + "/ws");
+
+    ws.onopen = function () {
+      document.getElementById("statusDot").classList.remove("disconnected");
+      document.getElementById("statusDot").title = "Connected";
+    };
+
+    ws.onclose = function () {
+      document.getElementById("statusDot").classList.add("disconnected");
+      document.getElementById("statusDot").title = "Disconnected";
+      setTimeout(connect, 2000);
+    };
+
+    ws.onmessage = function (event) {
+      var msg = JSON.parse(event.data);
+
+      if (msg.type === "approval_request") {
+        queue.push(msg);
+        if (!currentId) showNext();
+      }
+
+      if (msg.type === "approval_resolved") {
+        queue = queue.filter(function (a) { return a.id !== msg.id; });
+        if (currentId === msg.id) {
+          currentId = null;
+          clearInterval(countdownInterval);
+          showNext();
+        }
+        updatePendingCount();
+      }
+    };
+  }
+
+  function showNext() {
+    if (queue.length === 0) {
+      currentId = null;
+      document.getElementById("approvalCard").classList.remove("visible");
+      document.getElementById("emptyState").style.display = "";
+      clearInterval(countdownInterval);
+      return;
+    }
+
+    var approval = queue[0];
+    currentId = approval.id;
+
+    document.getElementById("emptyState").style.display = "none";
+    document.getElementById("approvalCard").classList.add("visible");
+    document.getElementById("toolName").textContent = approval.toolName;
+    document.getElementById("runtime").textContent = approval.runtime;
+    document.getElementById("timestamp").textContent = new Date(approval.timestamp).toLocaleTimeString();
+    document.getElementById("args").textContent = JSON.stringify(approval.params, null, 2);
+
+    document.getElementById("btnDeny").disabled = false;
+    document.getElementById("btnApprove").disabled = false;
+
+    startCountdown(approval.timestamp);
+    updatePendingCount();
+  }
+
+  function startCountdown(timestampStr) {
+    clearInterval(countdownInterval);
+    var startTime = new Date(timestampStr).getTime();
+
+    function tick() {
+      var elapsed = (Date.now() - startTime) / 1000;
+      var remaining = Math.max(0, Math.ceil(TIMEOUT_SECONDS - elapsed));
+      var el = document.getElementById("countdown");
+      el.textContent = "Auto-denying in " + remaining + " second" + (remaining !== 1 ? "s" : "");
+      el.className = remaining <= 10 ? "countdown urgent" : "countdown";
+
+      if (remaining <= 0) {
+        clearInterval(countdownInterval);
+      }
+    }
+
+    tick();
+    countdownInterval = setInterval(tick, 1000);
+  }
+
+  function updatePendingCount() {
+    var extra = queue.length - 1;
+    var el = document.getElementById("pendingCount");
+    if (extra > 0) {
+      el.textContent = extra + " more request" + (extra !== 1 ? "s" : "") + " pending";
+    } else {
+      el.textContent = "";
+    }
+  }
+
+  window.decide = function (decision) {
+    if (!currentId) return;
+
+    document.getElementById("btnDeny").disabled = true;
+    document.getElementById("btnApprove").disabled = true;
+
+    fetch("/api/approve/" + currentId, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ decision: decision }),
+    }).then(function () {
+      queue = queue.filter(function (a) { return a.id !== currentId; });
+      currentId = null;
+      clearInterval(countdownInterval);
+      showNext();
+    }).catch(function () {
+      document.getElementById("btnDeny").disabled = false;
+      document.getElementById("btnApprove").disabled = false;
+    });
+  };
+
+  connect();
+})();
+</script>
+</body>
+</html>

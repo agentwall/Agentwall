@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgentWall — Log Viewer</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: #0f1117;
+    color: #e1e4e8;
+    min-height: 100vh;
+  }
+  a { color: #58a6ff; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  .nav {
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+    padding: 0.75rem 1.5rem;
+    background: #161b22;
+    border-bottom: 1px solid #30363d;
+  }
+  .nav-brand {
+    font-weight: 700;
+    font-size: 1rem;
+    color: #e1e4e8;
+    margin-right: auto;
+  }
+  .nav a { font-size: 0.875rem; }
+  .nav-active { color: #e1e4e8; font-weight: 600; }
+
+  .status-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #3fb950;
+    margin-left: 0.5rem;
+  }
+  .status-dot.disconnected { background: #f85149; }
+
+  .container {
+    max-width: 960px;
+    margin: 1.5rem auto;
+    padding: 0 1rem;
+  }
+
+  .filters {
+    display: flex;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .filters select, .filters input {
+    background: #161b22;
+    color: #e1e4e8;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.8125rem;
+    outline: none;
+  }
+  .filters select:focus, .filters input:focus {
+    border-color: #58a6ff;
+  }
+  .filters input[type="text"] {
+    flex: 1;
+    min-width: 160px;
+  }
+  .filters input[type="date"] {
+    color-scheme: dark;
+  }
+
+  .log-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.8125rem;
+  }
+  .log-table th {
+    text-align: left;
+    padding: 0.5rem 0.625rem;
+    color: #8b949e;
+    font-weight: 600;
+    font-size: 0.6875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    border-bottom: 1px solid #30363d;
+    white-space: nowrap;
+  }
+  .log-table td {
+    padding: 0.4375rem 0.625rem;
+    border-bottom: 1px solid #21262d;
+    vertical-align: top;
+    white-space: nowrap;
+  }
+  .log-table td:last-child {
+    white-space: normal;
+    word-break: break-all;
+  }
+  .log-table tr:hover td {
+    background: #161b22;
+  }
+
+  .d-allow { color: #3fb950; font-weight: 600; }
+  .d-deny { color: #f85149; font-weight: 600; }
+  .d-ask-allow { color: #d29922; font-weight: 600; }
+  .d-ask-deny { color: #f0883e; font-weight: 600; }
+
+  .empty-log {
+    text-align: center;
+    padding: 3rem 1rem;
+    color: #8b949e;
+  }
+</style>
+</head>
+<body>
+
+<nav class="nav">
+  <span class="nav-brand">AgentWall</span>
+  <a href="/">Approval</a>
+  <a href="/policy">Policy</a>
+  <a href="/log" class="nav-active">Log</a>
+  <span class="status-dot" id="statusDot"></span>
+</nav>
+
+<div class="container">
+  <div class="filters">
+    <select id="filterRuntime">
+      <option value="">All runtimes</option>
+      <option value="openclaw">openclaw</option>
+      <option value="mcp">mcp</option>
+      <option value="cursor">cursor</option>
+      <option value="claude-code">claude-code</option>
+    </select>
+    <select id="filterDecision">
+      <option value="">All decisions</option>
+      <option value="allow">allow</option>
+      <option value="deny">deny</option>
+      <option value="ask">ask</option>
+    </select>
+    <input type="date" id="filterDate">
+    <input type="text" id="filterSearch" placeholder="Search tool or command...">
+  </div>
+
+  <table class="log-table">
+    <thead>
+      <tr>
+        <th>Time</th>
+        <th>Runtime</th>
+        <th>Decision</th>
+        <th>Reason</th>
+        <th>Tool / Command</th>
+      </tr>
+    </thead>
+    <tbody id="logBody"></tbody>
+  </table>
+
+  <div class="empty-log" id="emptyLog">No log entries found.</div>
+</div>
+
+<script>
+(function () {
+  var allEntries = [];
+  var ws = null;
+
+  var filterRuntime = document.getElementById("filterRuntime");
+  var filterDecision = document.getElementById("filterDecision");
+  var filterDate = document.getElementById("filterDate");
+  var filterSearch = document.getElementById("filterSearch");
+
+  filterDate.value = new Date().toISOString().slice(0, 10);
+
+  function connect() {
+    var proto = location.protocol === "https:" ? "wss:" : "ws:";
+    ws = new WebSocket(proto + "//" + location.host + "/ws");
+
+    ws.onopen = function () {
+      document.getElementById("statusDot").classList.remove("disconnected");
+    };
+
+    ws.onclose = function () {
+      document.getElementById("statusDot").classList.add("disconnected");
+      setTimeout(connect, 2000);
+    };
+
+    ws.onmessage = function (event) {
+      var msg = JSON.parse(event.data);
+      if (msg.type === "log_entry") {
+        var today = new Date().toISOString().slice(0, 10);
+        if (filterDate.value === today) {
+          allEntries.unshift(msg.entry);
+          render();
+        }
+      }
+    };
+  }
+
+  function loadLog(date) {
+    fetch("/api/log?date=" + encodeURIComponent(date))
+      .then(function (r) { return r.json(); })
+      .then(function (entries) {
+        allEntries = entries.reverse();
+        render();
+      })
+      .catch(function () {
+        allEntries = [];
+        render();
+      });
+  }
+
+  function getDecisionDisplay(entry) {
+    if (entry.decision === "allow" && entry.resolvedBy === "user") {
+      return { text: "ASK \u2192 ALLOW", cls: "d-ask-allow" };
+    }
+    if (entry.decision === "deny" && entry.resolvedBy === "user") {
+      return { text: "ASK \u2192 DENY", cls: "d-ask-deny" };
+    }
+    if (entry.decision === "allow") {
+      return { text: "ALLOW", cls: "d-allow" };
+    }
+    if (entry.decision === "deny") {
+      return { text: "DENY", cls: "d-deny" };
+    }
+    return { text: entry.decision.toUpperCase(), cls: "" };
+  }
+
+  function matchesFilters(entry) {
+    var runtime = filterRuntime.value;
+    if (runtime && entry.runtime !== runtime) return false;
+
+    var dec = filterDecision.value;
+    if (dec && entry.decision !== dec) return false;
+
+    var search = filterSearch.value.toLowerCase();
+    if (search) {
+      var haystack = (entry.command + " " + (entry.toolName || "")).toLowerCase();
+      if (haystack.indexOf(search) === -1) return false;
+    }
+
+    return true;
+  }
+
+  function render() {
+    var tbody = document.getElementById("logBody");
+    var emptyEl = document.getElementById("emptyLog");
+    var html = "";
+    var visible = 0;
+
+    for (var i = 0; i < allEntries.length; i++) {
+      var entry = allEntries[i];
+      if (!matchesFilters(entry)) continue;
+      visible++;
+
+      var d = new Date(entry.ts);
+      var time = [d.getHours(), d.getMinutes(), d.getSeconds()]
+        .map(function (v) { return String(v).padStart(2, "0"); })
+        .join(":");
+
+      var dec = getDecisionDisplay(entry);
+
+      html += "<tr>" +
+        "<td>" + time + "</td>" +
+        "<td>" + escapeHtml(entry.runtime) + "</td>" +
+        "<td class=\"" + dec.cls + "\">" + dec.text + "</td>" +
+        "<td>" + escapeHtml(entry.resolvedBy) + "</td>" +
+        "<td>" + escapeHtml(entry.command) + "</td>" +
+        "</tr>";
+    }
+
+    tbody.innerHTML = html;
+    emptyEl.style.display = visible > 0 ? "none" : "";
+  }
+
+  function escapeHtml(str) {
+    if (!str) return "";
+    return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+
+  filterRuntime.addEventListener("change", render);
+  filterDecision.addEventListener("change", render);
+  filterSearch.addEventListener("input", render);
+  filterDate.addEventListener("change", function () {
+    loadLog(filterDate.value);
+  });
+
+  loadLog(filterDate.value);
+  connect();
+})();
+</script>
+</body>
+</html>

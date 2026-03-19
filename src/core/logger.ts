@@ -19,12 +19,16 @@ const DECISION_COLORS: Record<DecisionVerdict, string> = {
 
 export class EventLogger {
   private stream: WriteStream;
+  private onEntry?: (entry: LogEntry) => void;
   readonly logPath: string;
+  readonly logDir: string;
 
-  constructor() {
+  constructor(options?: { onEntry?: (entry: LogEntry) => void }) {
     mkdirSync(AGENTWALL_DIR, { recursive: true });
     const date = new Date().toISOString().slice(0, 10);
+    this.logDir = AGENTWALL_DIR;
     this.logPath = join(AGENTWALL_DIR, `session-${date}.jsonl`);
+    this.onEntry = options?.onEntry;
     this.stream = createWriteStream(this.logPath, { flags: "a" });
     this.stream.on("error", (err) => {
       process.stderr.write(`${YELLOW}warning:${RESET} failed to write log: ${err.message}\n`);
@@ -39,6 +43,7 @@ export class EventLogger {
         `${YELLOW}warning:${RESET} failed to write log: ${(err as Error).message}\n`
       );
     }
+    this.onEntry?.(entry);
   }
 
   close(): void {
