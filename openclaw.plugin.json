@@ -1,0 +1,7 @@
+{
+  "id": "agentwall",
+  "name": "AgentWall",
+  "description": "Runtime safety layer — prompts user to approve or deny every tool call before execution",
+  "version": "0.2.0",
+  "configSchema": {}
+}

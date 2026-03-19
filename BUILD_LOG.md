@@ -1,4 +1,4 @@
-# AgentWall v0.1.0 — Build Log
+# AgentWall — Build Log
 
 ## What Was Built
 
@@ -154,3 +154,143 @@ column alignment.
   auto-deny timeout, concurrent queue)
 - WebSocket reconnection after gateway disconnect
 - Lock file conflict detection with a second running instance
+
+---
+
+## v0.2.0 — Native Plugin Build (2026-03-19)
+
+### What Changed
+
+v0.2 replaces the v0.1 WebSocket adapter (`exec.approval.requested` event hack)
+with a native OpenClaw plugin using the `before_tool_call` hook. This intercepts
+**all** tool calls — not just `exec` — before they execute.
+
+### Reverse-Engineering Results
+
+Plugin discovery was determined by reading the compiled OpenClaw runtime
+(`skills-CtzUimzY.js`, `utils-B88a096J.js`, `frontmatter-D0K3qXQH.js`):
+
+- `resolvePluginSourceRoots()` in `src/plugins/roots.ts` resolves three roots:
+  - `stock` — bundled plugins shipped with OpenClaw
+  - `global` — `path.join(resolveConfigDir(), "extensions")` → `~/.openclaw/extensions/`
+  - `workspace` — `<workspaceRoot>/.openclaw/extensions/`
+- `resolveConfigDir()` returns `~/.openclaw` (or `$OPENCLAW_STATE_DIR` if set)
+- `discoverInDirectory()` scans each subdirectory, looks for `openclaw.plugin.json`
+  manifest and falls back to `DEFAULT_PLUGIN_ENTRY_CANDIDATES` (`index.ts`,
+  `index.js`, `index.mjs`, `index.cjs`)
+- The `before_tool_call` hook returns `{ block, blockReason, params }` to
+  control tool execution
+- `MANIFEST_KEY` in `package.json` is `"openclaw"` — the `openclaw.extensions`
+  array is required for `openclaw plugins install` to recognize the entry point
+
+### Wiring — What Worked and What Didn't
+
+**Attempt 1 — Symlink into `~/.openclaw/extensions/` (FAILED)**
+
+```
+ln -s ~/agentwall ~/.openclaw/extensions/agentwall
+```
+
+This did not work. `discoverInDirectory()` uses `fs.readdirSync(dir, { withFileTypes: true })`
+and the resulting `Dirent` objects return `isDirectory() === false` for symlinks.
+The code at line 622 (`if (!entry.isDirectory()) continue;`) skips them. No
+diagnostic was emitted — the symlink was silently ignored.
+
+**Attempt 2 — `openclaw plugins install --link` (FAILED initially)**
+
+```
+openclaw plugins install ~/agentwall --link
+```
+
+First run failed with: `package.json missing openclaw.extensions`. The install
+command requires a `"openclaw": { "extensions": ["./index.js"] }` field in
+`package.json` to know which file is the plugin entry point.
+
+**Attempt 3 — Added `openclaw.extensions`, re-ran install (SUCCESS)**
+
+After adding the `openclaw` metadata to `package.json`:
+
+```json
+"openclaw": {
+  "extensions": ["./index.js"]
+}
+```
+
+Re-ran `openclaw plugins install ~/agentwall --link`. Output:
+
+```
+[plugins] [AgentWall] v0.2 activated — intercepting all tool calls
+Linked plugin path: ~/agentwall
+Restart the gateway to load plugins.
+```
+
+This approach uses `discoverFromPath()` (via config `loadPaths`), which resolves
+paths with `fs.statSync` — follows symlinks properly. The install command wrote
+the path to `~/.openclaw/openclaw.json` under `plugins.installs`.
+
+### New Files
+
+```
+agentwall/
+├── openclaw.plugin.json          ← plugin manifest (id, name, version, configSchema)
+├── index.js                      ← plugin entry point (activate → registers hook)
+└── src/
+    ├── hook.js                   ← before_tool_call handler (intercept → policy → prompt → log)
+    ├── policy.js                 ← allow/block/prompt policy (configurable sets)
+    ├── approver.js               ← terminal approval prompt (y/N, 5-min auto-deny)
+    └── logger.js                 ← JSONL decision log at ~/.agentwall/decisions.jsonl
+```
+
+### Modified Files
+
+- `package.json` — version → 0.2.0, added `"main": "index.js"`, added
+  `"openclaw": { "extensions": ["./index.js"] }`
+
+### Architecture
+
+```
+OpenClaw gateway
+  └─ plugin loader (reads ~/.openclaw/openclaw.json → plugins.installs.agentwall)
+       └─ loads ~/agentwall/index.js
+            └─ activate(api) registers before_tool_call hook
+                 └─ AgentWall handler (src/hook.js)
+                      ├─ getPolicy(toolName) → allow | block | prompt
+                      ├─ if 'block' → return { block: true, blockReason }
+                      ├─ if 'allow' → return undefined (pass-through)
+                      └─ if 'prompt':
+                           ├─ promptApproval() → stderr prompt, y/N
+                           ├─ logDecision() → ~/.agentwall/decisions.jsonl
+                           └─ return { block: true } or undefined
+```
+
+### v0.1 Code Preserved
+
+All v0.1 TypeScript source (`src/cli.ts`, `src/core/*`, `src/adapters/*`) remains
+intact. The v0.2 plugin files are plain JS and coexist alongside the v0.1 code.
+The v0.1 WebSocket adapter is now deprecated — v0.2 handles all tool calls
+(including `exec`) through the plugin hook. Running both simultaneously would
+cause double-prompting on `exec` calls.
+
+### Test Results (2026-03-19)
+
+Plugin installed via `openclaw plugins install --link`. Verified with
+`openclaw plugins list` — shows `AgentWall (agentwall) loaded`, origin `config`,
+version `0.2.0`.
+
+After gateway restart, triggered two `exec` tool calls ("ls -la ~"):
+
+| # | Tool | Decision | Reason | Logged |
+|---|------|----------|--------|--------|
+| 1 | exec | approved | user   | yes    |
+| 2 | exec | blocked  | user   | yes    |
+
+Both decisions written to `~/.agentwall/decisions.jsonl` with full context
+(timestamp, toolName, params, agentId, sessionKey, runId).
+
+### Still To Test
+
+- Non-exec tool interception (`read_file`, `write_file`, `edit`, `apply_patch`)
+- Auto-deny on prompt timeout (5 minutes no response)
+- Policy auto-allow and auto-block (adding tools to `AUTO_ALLOW` / `AUTO_BLOCK`
+  sets in `src/policy.js`)
+- Headless mode behavior (no TTY → prompt fails → blocks for safety)

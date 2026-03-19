@@ -1,8 +1,9 @@
 {
   "name": "agentwall",
-  "version": "0.1.0",
-  "description": "Runtime safety layer for local AI agents — unified policy, approval, and audit trail",
+  "version": "0.2.0",
+  "description": "Runtime safety layer for OpenClaw agents",
   "type": "module",
+  "main": "index.js",
   "bin": {
     "agentwall": "./dist/cli.js"
   },
@@ -13,6 +14,9 @@
   },
   "keywords": ["ai", "agents", "safety", "openclaw", "llm", "security"],
   "license": "MIT",
+  "openclaw": {
+    "extensions": ["./index.js"]
+  },
   "engines": { "node": ">=22" },
   "dependencies": {
     "js-yaml": "^4.1.0",
