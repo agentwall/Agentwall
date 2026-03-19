@@ -230,12 +230,24 @@ export class PolicyEngine {
     for (const rule of this.config.deny ?? []) {
       if (ruleMatches(rule, proposal)) return "deny";
     }
+
+    // Command-only ask rules fire before path-based allow rules.
+    // Prevents workspace/** allow from silently permitting rm -rf, sudo, etc.
+    for (const rule of this.config.ask ?? []) {
+      if (rule.command && !rule.path && matchesCommand(proposal.command, rule.command)) {
+        return "ask";
+      }
+    }
+
     for (const rule of this.config.allow ?? []) {
       if (ruleMatches(rule, proposal)) return "allow";
     }
+
+    // Remaining ask rules (path-only or combined command+path)
     for (const rule of this.config.ask ?? []) {
-      if (ruleMatches(rule, proposal)) return "ask";
+      if (!rule.command && ruleMatches(rule, proposal)) return "ask";
     }
+
     return "ask";
   }
 
