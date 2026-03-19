@@ -224,6 +224,55 @@
   let countdownInterval = null;
   let ws = null;
 
+  function updateTabTitle() {
+    if (queue.length > 0) {
+      document.title = "(" + queue.length + ") AgentWall \u2014 Approval Required";
+    } else {
+      document.title = "AgentWall";
+    }
+  }
+
+  var audioCtx = null;
+
+  function warmAudioContext() {
+    try {
+      if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      if (audioCtx.state === "suspended") {
+        audioCtx.resume();
+      }
+    } catch (e) {}
+  }
+
+  document.addEventListener("click", warmAudioContext, { once: false });
+  document.addEventListener("keydown", warmAudioContext, { once: false });
+
+  function playNotificationSound() {
+    try {
+      warmAudioContext();
+      if (!audioCtx || audioCtx.state !== "running") return;
+
+      var oscillator = audioCtx.createOscillator();
+      var gainNode = audioCtx.createGain();
+
+      oscillator.connect(gainNode);
+      gainNode.connect(audioCtx.destination);
+
+      oscillator.type = "sine";
+      oscillator.frequency.setValueAtTime(880, audioCtx.currentTime);
+      oscillator.frequency.exponentialRampToValueAtTime(440, audioCtx.currentTime + 0.3);
+
+      gainNode.gain.setValueAtTime(0.3, audioCtx.currentTime);
+      gainNode.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.5);
+
+      oscillator.start(audioCtx.currentTime);
+      oscillator.stop(audioCtx.currentTime + 0.5);
+    } catch (e) {
+      // Silently ignore — sound failure must never affect approval flow
+    }
+  }
+
   function connect() {
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     ws = new WebSocket(proto + "//" + location.host + "/ws");
@@ -245,6 +294,8 @@
       if (msg.type === "approval_request") {
         queue.push(msg);
         if (!currentId) showNext();
+        updateTabTitle();
+        playNotificationSound();
       }
 
       if (msg.type === "approval_resolved") {
@@ -255,6 +306,7 @@
           showNext();
         }
         updatePendingCount();
+        updateTabTitle();
       }
     };
   }
@@ -358,6 +410,7 @@
 
   connect();
   loadClientsSummary();
+  updateTabTitle();
 })();
 </script>
 </body>
