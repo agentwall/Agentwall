@@ -2,3 +2,8 @@ node_modules/
 dist/
 .DS_Store
 *.local
+
+# Local design / build notes (kept on disk, not published)
+AgentWall_PDD.md
+AgentWall_TDD.md
+BUILD_LOG.md
