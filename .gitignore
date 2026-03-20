@@ -7,3 +7,6 @@ dist/
 AgentWall_PDD.md
 AgentWall_TDD.md
 BUILD_LOG.md
+
+# Debug / probe scripts
+probe*.mjs

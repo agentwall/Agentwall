@@ -92,12 +92,19 @@ npx @agentwall/agentwall setup
 # 2. Create a default policy (protects credentials, database, shell)
 agentwall init
 
-# 3. Restart your AI client — AgentWall is now active
-
-# 4. Open the web UI to see what your agent is doing
+# 3. Start the web UI first — it owns port 7823
 agentwall ui
 # → http://localhost:7823
+
+# 4. Start OpenClaw gateway (if using OpenClaw)
+openclaw gateway
+# Detects AgentWall on port 7823 and routes approvals to the browser
+
+# 5. Open your AI client (Claude Desktop, Cursor, etc.)
+# MCP proxies spawn automatically and connect to the same UI
 ```
+
+**Boot order matters.** Start `agentwall ui` before the OpenClaw gateway and before opening AI clients. The gateway and MCP proxies detect the UI on startup and route approval requests to it. If the UI isn't running yet, they fall back to terminal prompts.
 
 ---
 
@@ -288,11 +295,19 @@ Edit `~/.agentwall/policy.yaml` and changes apply instantly across all running p
 
 ## Audit log
 
-Every decision is logged to `~/.agentwall/session-YYYY-MM-DD.jsonl` — written independently of what the model claims it did.
+Every decision is logged independently of what the model claims it did.
+
+| Log file | Written by | Contents |
+|---|---|---|
+| `~/.agentwall/session-YYYY-MM-DD.jsonl` | MCP proxy | Tool calls intercepted via proxy |
+| `~/.agentwall/decisions.jsonl` | OpenClaw plugin | Tool calls intercepted via native plugin |
+
+The web UI log viewer merges both files automatically.
 
 ```bash
 agentwall replay          # color-coded table of today's decisions
 agentwall replay 20       # last 20 entries
+agentwall clear-logs      # remove all log files and start fresh
 ```
 
 The log is ground truth. If the model reports it only read one file but AgentWall logged 47 reads, the log is right.
@@ -309,6 +324,7 @@ agentwall ui [--port 7823]           Start the web UI
 agentwall init                       Create default policy at ~/.agentwall/policy.yaml
 agentwall status                     Show protection status and today's decision counts
 agentwall replay [N]                 Show recent audit log entries (color-coded)
+agentwall clear-logs                 Remove all log files
 agentwall --version                  Print version
 ```
 

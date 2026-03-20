@@ -307,25 +307,70 @@ export class AgentWallWebServer {
   ): void {
     const url = new URL(req.url ?? "/", "http://localhost");
     const date = url.searchParams.get("date") ?? new Date().toISOString().slice(0, 10);
-    const logPath = path.join(this.options.logDir, `session-${date}.jsonl`);
 
-    res.setHeader("Content-Type", "application/json");
-
-    if (!fs.existsSync(logPath)) {
-      res.end(JSON.stringify([]));
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ error: "Invalid date format" }));
       return;
     }
 
-    const lines = fs.readFileSync(logPath, "utf-8").split("\n").filter(Boolean);
-    const entries = lines.map((line) => {
-      try {
-        return JSON.parse(line);
-      } catch {
-        return null;
-      }
-    }).filter(Boolean);
+    res.setHeader("Content-Type", "application/json");
+
+    const entries: Record<string, unknown>[] = [];
+
+    const sessionPath = path.join(this.options.logDir, `session-${date}.jsonl`);
+    this.readJsonlInto(sessionPath, entries);
+
+    if (entries.length === 0) {
+      const decisionsPath = path.join(this.options.logDir, "decisions.jsonl");
+      this.readJsonlInto(decisionsPath, entries, date);
+    }
+
+    entries.sort((a, b) => {
+      const tsA = (a.ts as string) ?? (a.timestamp as string) ?? "";
+      const tsB = (b.ts as string) ?? (b.timestamp as string) ?? "";
+      return tsA.localeCompare(tsB);
+    });
 
     res.end(JSON.stringify(entries));
+  }
+
+  private readJsonlInto(
+    filePath: string,
+    out: Record<string, unknown>[],
+    filterDate?: string,
+  ): void {
+    if (!fs.existsSync(filePath)) return;
+
+    const lines = fs.readFileSync(filePath, "utf-8").split("\n").filter(Boolean);
+    for (const line of lines) {
+      try {
+        const entry = JSON.parse(line);
+        if (filterDate) {
+          const ts = entry.ts ?? entry.timestamp ?? "";
+          if (!ts.startsWith(filterDate)) continue;
+        }
+        if (entry.timestamp && !entry.ts) {
+          entry.ts = entry.timestamp;
+        }
+        if (entry.toolName && !entry.command) {
+          entry.command = entry.toolName;
+        }
+        if (entry.reason && !entry.resolvedBy) {
+          entry.resolvedBy = entry.reason;
+        }
+        if (entry.decision === "blocked") {
+          entry.decision = "deny";
+        }
+        if (entry.decision === "approved") {
+          entry.decision = "allow";
+          entry.resolvedBy = "user";
+        }
+        out.push(entry);
+      } catch {
+        // skip malformed lines
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------

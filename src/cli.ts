@@ -578,6 +578,29 @@ function replayCommand(n?: number): void {
   EventLogger.replay(n);
 }
 
+function clearLogsCommand(): void {
+  const logFiles = readdirSync(AGENTWALL_DIR).filter(
+    (f) => f.endsWith(".jsonl") || f.endsWith(".jsonl.bak"),
+  );
+
+  if (logFiles.length === 0) {
+    process.stdout.write("  No log files found.\n\n");
+    return;
+  }
+
+  for (const file of logFiles) {
+    try {
+      unlinkSync(join(AGENTWALL_DIR, file));
+      process.stdout.write(`  ${GREEN}✓${RESET} Removed ${file}\n`);
+    } catch {
+      process.stdout.write(`  ${RED}✗${RESET} Failed to remove ${file}\n`);
+    }
+  }
+
+  process.stdout.write(`\n  Cleared ${logFiles.length} log file${logFiles.length !== 1 ? "s" : ""}.\n`);
+  process.stdout.write(`  Restart agentwall ui for a fresh session.\n\n`);
+}
+
 function statusCommand(): void {
   process.stdout.write(`\n  AgentWall v${VERSION}\n\n`);
 
@@ -717,6 +740,7 @@ function helpCommand(): void {
     agentwall init                       Create ~/.agentwall/policy.yaml with default rules
     agentwall status                     Show protection status
     agentwall replay [N]                 Show last N log entries (default 50)
+    agentwall clear-logs                 Remove all log files
     agentwall start [--token <token>]    Start OpenClaw gateway adapter
     agentwall --version                  Print version
     agentwall --help                     Show this help
@@ -766,6 +790,9 @@ const remaining = process.argv.slice(3);
       break;
     case "replay":
       replayCommand(remaining[0] ? parseInt(remaining[0], 10) : undefined);
+      break;
+    case "clear-logs":
+      clearLogsCommand();
       break;
     case "status":
       statusCommand();
