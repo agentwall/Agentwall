@@ -1,7 +1,7 @@
 {
-  "name": "agentwall",
+  "name": "@agentwall/agentwall",
   "version": "0.8.0",
-  "description": "Policy-enforcing MCP proxy — intercepts AI agent tool calls before they execute",
+  "description": "Run AI agents safely on your local machine — policy-enforcing MCP proxy",
   "type": "module",
   "main": "dist/cli.js",
   "bin": {
@@ -9,7 +9,6 @@
   },
   "files": [
     "dist/",
-    "src/web/ui/",
     "index.js",
     "src/hook.js",
     "openclaw.plugin.json",
@@ -28,9 +27,20 @@
     "safety",
     "claude",
     "cursor",
-    "tool-approval"
+    "openclaw",
+    "agentwall",
+    "proxy",
+    "policy"
   ],
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/agentwall/agentwall.git"
+  },
+  "homepage": "https://github.com/agentwall/agentwall#readme",
+  "bugs": {
+    "url": "https://github.com/agentwall/agentwall/issues"
+  },
   "openclaw": {
     "extensions": [
       "./index.js"

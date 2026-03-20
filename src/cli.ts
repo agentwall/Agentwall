@@ -34,7 +34,7 @@ import {
   type DetectedConfig,
 } from "./core/clients.js";
 
-const VERSION = "0.7.0";
+const VERSION = "0.8.0";
 const AGENTWALL_DIR = join(homedir(), ".agentwall");
 const LOCK_FILE = join(AGENTWALL_DIR, "agentwall.lock");
 
@@ -729,6 +729,7 @@ function helpCommand(): void {
     v0.5  Hot-reload + rate limiting
     v0.6  Web UI — approval, policy editor, log viewer
     v0.7  Client visibility — Clients tab, see and manage everything
+    v0.8  npm package (@agentwall/agentwall)
 
 `);
 }
