@@ -13,7 +13,8 @@
     "index.js",
     "src/hook.js",
     "openclaw.plugin.json",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsc",
@@ -29,7 +30,7 @@
     "cursor",
     "tool-approval"
   ],
-  "license": "MIT",
+  "license": "Apache-2.0",
   "openclaw": {
     "extensions": [
       "./index.js"
