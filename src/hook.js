@@ -1,7 +1,19 @@
 import { askUser, printDecision } from '../dist/core/prompt.js';
 import { logDecision } from './logger.js';
-import { getPolicy } from './policy.js';
 import { randomUUID } from 'node:crypto';
+
+const SHELL_TOOL_NAMES = new Set([
+  'bash', 'exec', 'shell', 'run_command', 'execute_command',
+  'run_terminal_command', 'terminal',
+]);
+
+function extractCommand(toolName, params) {
+  if (SHELL_TOOL_NAMES.has(toolName)) {
+    const cmd = params?.command ?? params?.cmd ?? params?.script;
+    if (typeof cmd === 'string') return cmd;
+  }
+  return toolName;
+}
 
 function buildLogEntry(proposal, decision, resolvedBy, ctx) {
   return {
@@ -26,42 +38,46 @@ function buildLogEntry(proposal, decision, resolvedBy, ctx) {
  *   undefined / void                     → tool call runs with original params
  */
 export function createBeforeToolCallHandler(logger, options = {}) {
-  const { eventLogger } = options;
+  const { eventLogger, policy } = options;
 
   return async (event, ctx) => {
     const { toolName, params } = event;
 
     logger.info(`[AgentWall] Tool call intercepted: ${toolName}`);
 
-    const policy = getPolicy(toolName, params);
+    const command = extractCommand(toolName, params);
 
     const proposal = {
       approvalId: randomUUID(),
       runtime: 'openclaw',
-      command: toolName,
+      command,
       toolName: toolName,
       args: params,
       workingDir: params?.path || params?.file || '',
       toolInput: params,
     };
 
-    if (policy === 'block') {
-      logger.warn(`[AgentWall] Blocked by policy: ${toolName}`);
-      printDecision('deny', toolName, 'policy rule matched');
-      logDecision({ toolName, params, decision: 'blocked', reason: 'policy', ctx });
-      eventLogger?.log(buildLogEntry(proposal, 'deny', 'policy', ctx));
-      return {
-        block: true,
-        blockReason: `AgentWall: tool '${toolName}' is blocked by policy`
-      };
-    }
+    if (policy) {
+      const result = policy.evaluate(proposal);
 
-    if (policy === 'allow') {
-      logger.info(`[AgentWall] Auto-allowed: ${toolName}`);
-      printDecision('allow', toolName, 'auto-allow');
-      logDecision({ toolName, params, decision: 'allowed', reason: 'auto-allow', ctx });
-      eventLogger?.log(buildLogEntry(proposal, 'allow', 'auto-allow', ctx));
-      return;
+      if (result.decision === 'deny') {
+        logger.warn(`[AgentWall] Blocked by policy: ${toolName}(${command})`);
+        printDecision('deny', `${toolName}(${command})`, result.message || 'policy rule matched');
+        logDecision({ toolName, params, decision: 'blocked', reason: 'policy', ctx });
+        eventLogger?.log(buildLogEntry(proposal, 'deny', 'policy', ctx));
+        return {
+          block: true,
+          blockReason: result.message || `AgentWall: tool '${toolName}' is blocked by policy`,
+        };
+      }
+
+      if (result.decision === 'allow') {
+        logger.info(`[AgentWall] Auto-allowed by policy: ${toolName}(${command})`);
+        printDecision('allow', `${toolName}(${command})`, 'policy');
+        logDecision({ toolName, params, decision: 'allowed', reason: 'policy', ctx });
+        eventLogger?.log(buildLogEntry(proposal, 'allow', 'policy', ctx));
+        return;
+      }
     }
 
     let userDecision = 'deny';

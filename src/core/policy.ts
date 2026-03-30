@@ -254,6 +254,7 @@ function ruleMatches(rule: PolicyRule, proposal: ActionProposal): boolean {
 type CallRecord = {
   toolName: string;
   timestamp: number;
+  args?: Record<string, unknown>;
 };
 
 class RateLimiter {
@@ -265,8 +266,23 @@ class RateLimiter {
     this.cleanupInterval.unref();
   }
 
+  private recordMatchesRule(record: CallRecord, rule: LimitRule): boolean {
+    if (!globToRegex(rule.tool).test(record.toolName)) return false;
+    if (!rule.match) return true;
+    if (!record.args) return false;
+
+    for (const [argName, pattern] of Object.entries(rule.match)) {
+      const argValue = record.args[argName];
+      if (argValue === undefined) return false;
+      const valueStr = typeof argValue === "string" ? argValue : JSON.stringify(argValue);
+      if (!globToRegex(pattern.toLowerCase()).test(valueStr.toLowerCase())) return false;
+    }
+    return true;
+  }
+
   check(
     toolName: string,
+    args: Record<string, unknown> | undefined,
     sessionKey: string,
     limits: LimitRule[],
   ): { limited: false } | { limited: true; retryAfterMs: number; rule: LimitRule } {
@@ -274,15 +290,16 @@ class RateLimiter {
 
     const now = Date.now();
     const history = this.sessions.get(sessionKey) ?? [];
+    const current: CallRecord = { toolName, timestamp: now, args };
 
     for (const rule of limits) {
-      if (!globToRegex(rule.tool).test(toolName)) continue;
+      if (!this.recordMatchesRule(current, rule)) continue;
 
       const windowMs = rule.window * 1000;
       const windowStart = now - windowMs;
 
       const callsInWindow = history.filter(
-        (r) => r.timestamp >= windowStart && globToRegex(rule.tool).test(r.toolName),
+        (r) => r.timestamp >= windowStart && this.recordMatchesRule(r, rule),
       );
 
       if (callsInWindow.length >= rule.max) {
@@ -295,7 +312,7 @@ class RateLimiter {
     return { limited: false };
   }
 
-  record(toolName: string, sessionKey: string, limits: LimitRule[]): void {
+  record(toolName: string, args: Record<string, unknown> | undefined, sessionKey: string, limits: LimitRule[]): void {
     if (limits.length === 0) return;
 
     const now = Date.now();
@@ -303,7 +320,7 @@ class RateLimiter {
       this.sessions.set(sessionKey, []);
     }
     const history = this.sessions.get(sessionKey)!;
-    history.push({ toolName, timestamp: now });
+    history.push({ toolName, timestamp: now, args });
 
     const maxWindowMs = Math.max(...limits.map((l) => l.window)) * 1000;
     const cutoff = now - maxWindowMs;
@@ -471,6 +488,20 @@ export class PolicyEngine {
       if (typeof r.window !== "number" || r.window <= 0) {
         throw new Error(`Limit rule "window" must be a positive number in ${this.policyPath}.`);
       }
+      if (r.match !== undefined) {
+        if (typeof r.match !== "object" || r.match === null || Array.isArray(r.match)) {
+          throw new Error(
+            `Invalid "match" value in limit rule — must be an object mapping argument names to glob patterns.`,
+          );
+        }
+        for (const [k, v] of Object.entries(r.match as Record<string, unknown>)) {
+          if (typeof v !== "string") {
+            throw new Error(
+              `Invalid match pattern for "${k}" in limit rule — must be a string.`,
+            );
+          }
+        }
+      }
     }
   }
 
@@ -538,7 +569,7 @@ export class PolicyEngine {
     const limits = this.config.limits ?? [];
 
     if (limits.length > 0) {
-      const result = this.rateLimiter.check(toolName, sessionKey, limits);
+      const result = this.rateLimiter.check(toolName, proposal.args, sessionKey, limits);
       if (result.limited) {
         const waitSecs = Math.ceil(result.retryAfterMs / 1000);
         const message =
@@ -547,7 +578,7 @@ export class PolicyEngine {
           `Wait ${waitSecs} second${waitSecs === 1 ? "" : "s"}.`;
         return { decision: "deny", reason: "rate-limit", message };
       }
-      this.rateLimiter.record(toolName, sessionKey, limits);
+      this.rateLimiter.record(toolName, proposal.args, sessionKey, limits);
     }
 
     for (const rule of this.config.deny ?? []) {

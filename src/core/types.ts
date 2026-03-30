@@ -31,6 +31,7 @@ export type LimitRule = {
   tool:   string;
   max:    number;
   window: number;
+  match?: Record<string, string>;
 };
 
 export interface TaintSnapshot {

@@ -63,7 +63,7 @@ export default {
 
     const eventLogger = new EventLogger({});
 
-    const handler = createBeforeToolCallHandler(api.logger, { eventLogger });
+    const handler = createBeforeToolCallHandler(api.logger, { eventLogger, policy });
     api.on('before_tool_call', handler);
 
     // Never start a web server inside OpenClaw — it conflicts with the gateway.

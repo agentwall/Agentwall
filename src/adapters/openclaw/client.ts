@@ -324,11 +324,15 @@ export class OpenClawAdapter {
 
     const req = (payload as any).request as Record<string, unknown> | undefined;
 
+    const command = (req?.command as string) || (plan?.rawCommand as string) || argv?.join(" ") || "";
+
     const proposal: ActionProposal = {
       approvalId: ((payload as any).id ?? payload.approvalId) as string,
       runtime: "openclaw",
-      command: (req?.command as string) || (plan?.rawCommand as string) || argv?.join(" ") || "",
+      command,
       workingDir: (req?.cwd as string) || (plan?.cwd as string) || "",
+      toolName: "exec",
+      args: { command },
       toolInput: payload,
       sessionId: payload.sessionId as string | undefined,
       agentId: payload.agentId as string | undefined,
