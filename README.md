@@ -155,6 +155,7 @@ openclaw plugins install agentwall --link
 ```
 
 The plugin runs independently of the MCP proxy. Both can run simultaneously, logging every decision to the same audit file regardless of which runtime triggered it.
+If you use `gog` for Gmail access, add email protection rules to your policy — see [Protect your email (gog)](#protect-your-email-gog) below.
 
 ---
 
@@ -202,6 +203,50 @@ ask:
 ```
 
 DROP and TRUNCATE blocked silently. DELETE and ALTER prompt for approval. Everything else runs normally. SQL matching is case-insensitive.
+
+### Protect your email (gog)
+
+OpenClaw uses the `gog` CLI to access Gmail. Since `gog` runs as a shell process,
+AgentWall's native plugin intercepts it via `exec` — before it touches your inbox.
+
+This is the policy that would have prevented the [OpenClaw inbox deletion incident](https://sfstandard.com/2026/02/25/openclaw-goes-rogue/):
+
+```yaml
+deny:
+  # Email — never trash or delete without explicit approval
+  - tool: exec
+    match:
+      command: "gog gmail trash*"
+  - tool: exec
+    match:
+      command: "gog gmail delete*"
+  - tool: exec
+    match:
+      command: "gog gmail batchDelete*"
+
+ask:
+  # Email — confirm any inbox modification
+  - tool: exec
+    match:
+      command: "gog gmail modify*"
+  - tool: exec
+    match:
+      command: "gog gmail archive*"
+
+limits:
+  - tool: exec
+    match:
+      command: "gog gmail*"
+    max: 10
+    window: 60    # max 10 Gmail operations per minute
+```
+
+Deletion rules are denied silently. Archive and modify prompt for approval.
+The rate limit catches runaway bulk operations even if a rule is missed.
+
+Why this works when OpenClaw's own guardrails fail: the policy lives in
+`~/.agentwall/policy.yaml` — outside the model's context window. Context
+compaction that wipes the model's safety instructions leaves this file untouched.
 
 ### Full default policy
 
@@ -421,6 +466,7 @@ After:
 - Common obfuscation patterns — `eval`, `base64 -d`
 - Database writes without approval — `DELETE`, `ALTER`, `UPDATE`
 - Multi-step exfiltration — taint tracking blocks credential read → network send chains
+- Email deletion via gog — deny trash/delete commands, rate-limit bulk Gmail operations
 
 ---
 
