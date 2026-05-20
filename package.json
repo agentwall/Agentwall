@@ -38,7 +38,7 @@
     "type": "git",
     "url": "git+https://github.com/agentwall/agentwall.git"
   },
-  "homepage": "https://github.com/agentwall/agentwall#readme",
+  "homepage": "https://agentwall.dev",
   "bugs": {
     "url": "https://github.com/agentwall/agentwall/issues"
   },

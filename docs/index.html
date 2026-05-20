@@ -1,0 +1,628 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AgentWall – Stop your AI agent before it goes too far</title>
+  <meta name="description" content="Policy-enforcing MCP proxy for local AI agents. Blocks dangerous tool calls before they execute — outside the runtime, independent of the model.">
+  <meta property="og:title" content="AgentWall: MCP security for AI agents">
+  <meta property="og:description" content="OpenClaw and Claude said always allow. AgentWall blocked it anyway.">
+  <meta property="og:image" content="https://agentwall.dev/og-image.png">
+  <meta property="og:url" content="https://agentwall.dev">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="https://agentwall.dev/og-image.png">
+  <link rel="icon" type="image/png" href="logo.png">
+  <link rel="apple-touch-icon" href="logo.png">
+  <link rel="canonical" href="https://agentwall.dev">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@700;800&family=JetBrains+Mono:wght@400;500&family=DM+Sans:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0c0c0e;
+      --surface: #141416;
+      --surface2: #1c1c20;
+      --border: #252528;
+      --border2: #2e2e33;
+      --red: #ff3b3b;
+      --red-dim: rgba(255,59,59,0.12);
+      --red-dim2: rgba(255,59,59,0.06);
+      --green: #00c47a;
+      --text: #f0f0f0;
+      --text2: #a0a0a8;
+      --text3: #5a5a64;
+      --mono: 'JetBrains Mono', monospace;
+      --display: 'Barlow Condensed', sans-serif;
+      --body: 'DM Sans', sans-serif;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--body);
+      font-size: 15px;
+      line-height: 1.6;
+      overflow-x: hidden;
+    }
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.035'/%3E%3C/svg%3E");
+      pointer-events: none;
+      z-index: 0;
+      opacity: 0.6;
+    }
+    .wrap {
+      max-width: 680px;
+      margin: 0 auto;
+      padding: 0 24px;
+      position: relative;
+      z-index: 1;
+    }
+    nav {
+      border-bottom: 1px solid var(--border);
+      padding: 18px 0;
+      position: sticky;
+      top: 0;
+      background: rgba(12,12,14,0.88);
+      backdrop-filter: blur(12px);
+      z-index: 100;
+    }
+    .nav-inner {
+      max-width: 680px;
+      margin: 0 auto;
+      padding: 0 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .nav-logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      text-decoration: none;
+    }
+    .nav-logo img { width: 28px; height: 28px; border-radius: 6px; }
+    .nav-logo span {
+      font-family: var(--display);
+      font-size: 1.05rem;
+      font-weight: 700;
+      color: var(--text);
+    }
+    .nav-right { display: flex; align-items: center; gap: 20px; }
+    .nav-link {
+      color: var(--text2);
+      text-decoration: none;
+      font-size: 0.875rem;
+      transition: color 0.15s;
+    }
+    .nav-link:hover { color: var(--text); }
+    .nav-star {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--surface2);
+      border: 1px solid var(--border2);
+      border-radius: 6px;
+      padding: 6px 12px;
+      font-size: 0.8rem;
+      font-family: var(--mono);
+      color: var(--text2);
+      text-decoration: none;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    .nav-star:hover { border-color: var(--text3); color: var(--text); }
+    .hero { padding: 56px 0 36px; }
+    .threat-banner {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--red-dim);
+      border: 1px solid rgba(255,59,59,0.25);
+      border-radius: 99px;
+      padding: 6px 14px;
+      font-family: var(--mono);
+      font-size: 0.75rem;
+      color: var(--red);
+      margin-bottom: 28px;
+      animation: fadeSlideDown 0.5s ease both;
+    }
+    .threat-banner .dot {
+      width: 6px; height: 6px;
+      background: var(--red);
+      border-radius: 50%;
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+    h1 {
+      font-family: var(--display);
+      font-size: clamp(2rem, 5vw, 2.8rem);
+      font-weight: 800;
+      line-height: 1.15;
+      margin-bottom: 18px;
+      animation: fadeSlideDown 0.5s 0.05s ease both;
+    }
+    h1 .blocked { color: var(--red); }
+    .subhead {
+      font-size: 1.05rem;
+      color: var(--text2);
+      line-height: 1.65;
+      max-width: 520px;
+      margin-bottom: 36px;
+      animation: fadeSlideDown 0.5s 0.1s ease both;
+    }
+    .hero-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 48px;
+      animation: fadeSlideDown 0.5s 0.15s ease both;
+    }
+    .btn-primary {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--text);
+      color: var(--bg);
+      padding: 11px 22px;
+      border-radius: 8px;
+      text-decoration: none;
+      font-weight: 600;
+      font-size: 0.9rem;
+      transition: opacity 0.15s;
+    }
+    .btn-primary:hover { opacity: 0.88; }
+    .btn-ghost {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: transparent;
+      color: var(--text2);
+      padding: 11px 22px;
+      border-radius: 8px;
+      text-decoration: none;
+      font-size: 0.9rem;
+      border: 1px solid var(--border2);
+      transition: border-color 0.15s, color 0.15s;
+    }
+    .btn-ghost:hover { border-color: var(--text3); color: var(--text); }
+    .install-wrap {
+      margin-bottom: 48px;
+      animation: fadeSlideDown 0.5s 0.2s ease both;
+    }
+    .install-label {
+      font-family: var(--mono);
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text3);
+      margin-bottom: 10px;
+    }
+    .install-box {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      background: var(--surface);
+      border: 1px solid var(--border2);
+      border-radius: 10px;
+      padding: 14px 18px;
+    }
+    .install-cmd { font-family: var(--mono); font-size: 0.95rem; color: var(--green); }
+    .install-sub { font-size: 0.78rem; color: var(--text3); margin-top: 8px; font-family: var(--mono); }
+    .copy-btn {
+      background: var(--surface2);
+      border: 1px solid var(--border2);
+      border-radius: 6px;
+      padding: 5px 12px;
+      font-size: 0.75rem;
+      cursor: pointer;
+      color: var(--text3);
+      font-family: var(--mono);
+      flex-shrink: 0;
+      transition: color 0.15s, border-color 0.15s;
+    }
+    .copy-btn:hover { color: var(--text); border-color: var(--text3); }
+    .clients-section {
+      margin-bottom: 56px;
+      animation: fadeSlideDown 0.5s 0.25s ease both;
+    }
+    .clients-label {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text3);
+      margin-bottom: 12px;
+    }
+    .clients-row { display: flex; flex-wrap: wrap; gap: 8px; }
+    .client-pill {
+      display: inline-flex;
+      align-items: center;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 99px;
+      padding: 5px 14px;
+      font-size: 0.82rem;
+      font-weight: 500;
+      color: var(--text2);
+    }
+    .demo-section {
+      margin-bottom: 40px;
+      animation: fadeSlideDown 0.5s 0.3s ease both;
+    }
+    .demo-label {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text3);
+      margin-bottom: 12px;
+    }
+    .demo-wrap { max-width: 820px; margin: 0 auto; }
+    .demo-frame {
+      background: var(--surface);
+      border: 1px solid var(--border2);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    .demo {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+    .section-divider { border: none; border-top: 1px solid var(--border); margin: 0 0 36px; }
+    .features-header {
+      font-family: var(--display);
+      font-size: 1.3rem;
+      font-weight: 700;
+      margin-bottom: 20px;
+    }
+    .feature-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-bottom: 40px;
+    }
+    @media (max-width: 520px) { .feature-grid { grid-template-columns: 1fr; } }
+    .feature-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 18px 20px;
+      transition: border-color 0.2s;
+      display: block;
+      text-decoration: none;
+      color: inherit;
+    }
+    .feature-card:hover { border-color: var(--border2); }
+    .feature-card.danger { border-color: rgba(255,59,59,0.2); background: var(--red-dim2); }
+    .feature-card.accent { border-color: rgba(0,196,122,0.2); background: rgba(0,196,122,0.04); }
+    .feature-icon { font-size: 1.1rem; margin-bottom: 10px; display: block; }
+    .feature-title {
+      font-family: var(--display);
+      font-size: 0.92rem;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+    .feature-desc { font-size: 0.82rem; color: var(--text2); line-height: 1.55; }
+    .feature-link {
+      display: inline-block;
+      margin-top: 8px;
+      font-size: 0.78rem;
+      font-family: var(--mono);
+      color: var(--green);
+      text-decoration: none;
+    }
+    .feature-link:hover { text-decoration: underline; }
+    .why-section {
+      background: var(--surface);
+      border: 1px solid var(--border2);
+      border-radius: 12px;
+      padding: 24px;
+      margin-bottom: 16px;
+    }
+    .why-label {
+      font-family: var(--mono);
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--red);
+      margin-bottom: 12px;
+    }
+    .why-text { font-size: 1rem; color: var(--text2); line-height: 1.7; }
+    .why-text strong { color: var(--text); }
+    .paper-section {
+      background: var(--surface);
+      border: 1px solid var(--border2);
+      border-radius: 12px;
+      padding: 20px 24px;
+      margin-bottom: 16px;
+    }
+    .paper-eyebrow {
+      font-family: var(--mono);
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--green);
+      margin-bottom: 8px;
+    }
+    .paper-title {
+      font-family: var(--display);
+      font-size: 1.05rem;
+      font-weight: 700;
+      margin-bottom: 8px;
+      line-height: 1.3;
+    }
+    .paper-meta { font-size: 0.85rem; color: var(--text2); margin-bottom: 14px; }
+    .paper-links { display: flex; flex-wrap: wrap; gap: 10px; }
+    .paper-link {
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      color: var(--green);
+      text-decoration: none;
+    }
+    .paper-link:hover { text-decoration: underline; }
+    .blog-cta {
+      border: 1px solid rgba(255,59,59,0.25);
+      background: var(--red-dim2);
+      border-radius: 12px;
+      padding: 20px 24px;
+      margin-bottom: 40px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+      flex-wrap: wrap;
+    }
+    .blog-cta-eyebrow {
+      font-family: var(--mono);
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--red);
+      margin-bottom: 6px;
+    }
+    .blog-cta-title { font-family: var(--display); font-size: 1rem; font-weight: 700; }
+    .btn-red {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--red);
+      color: white;
+      padding: 10px 18px;
+      border-radius: 8px;
+      text-decoration: none;
+      font-weight: 600;
+      font-size: 0.85rem;
+      white-space: nowrap;
+      transition: opacity 0.15s;
+    }
+    .btn-red:hover { opacity: 0.85; }
+    .proof-section { margin-bottom: 40px; }
+    .proof-label {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text3);
+      margin-bottom: 14px;
+    }
+    .proof-row { display: flex; flex-wrap: wrap; gap: 10px; }
+    .proof-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--surface);
+      border: 1px solid var(--border2);
+      border-radius: 8px;
+      padding: 8px 14px;
+      font-size: 0.8rem;
+      color: var(--text2);
+      text-decoration: none;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    .proof-badge:hover { border-color: var(--text3); color: var(--text); }
+    .proof-badge .check { color: var(--green); }
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 28px 0 48px;
+      color: var(--text3);
+      font-size: 0.8rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    footer a { color: var(--text3); text-decoration: none; transition: color 0.15s; }
+    footer a:hover { color: var(--text2); }
+    .footer-links { display: flex; flex-wrap: wrap; gap: 16px; }
+    @keyframes fadeSlideDown {
+      from { opacity: 0; transform: translateY(-10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+  </style>
+</head>
+<body>
+
+  <nav>
+    <div class="nav-inner">
+      <a class="nav-logo" href="/">
+        <img src="logo.png" alt="AgentWall">
+        <span>AgentWall</span>
+      </a>
+      <div class="nav-right">
+        <a class="nav-link" href="https://arxiv.org/abs/2605.16265">Paper</a>
+        <a class="nav-link" href="https://github.com/agentwall/agentwall-registry">Policy library</a>
+        <a class="nav-link" href="https://github.com/agentwall/agentwall#readme">Docs</a>
+        <a class="nav-star" href="https://github.com/agentwall/agentwall">★ Star</a>
+      </div>
+    </div>
+  </nav>
+
+  <div class="wrap">
+
+    <section class="hero">
+      <div class="threat-banner">
+        <span class="dot"></span>
+        Your AI agent can read every credential on your machine
+      </div>
+
+      <h1>
+        OpenClaw said "always allow."<br>
+        AgentWall <span class="blocked">blocked it</span> anyway.
+      </h1>
+
+      <p class="subhead">
+        A policy-enforcing MCP proxy between your AI agent and its tools.
+        Rules run <strong>outside the runtime</strong> — before credentials are read or commands execute.
+      </p>
+
+      <div class="hero-actions">
+        <a class="btn-primary" href="https://github.com/agentwall/agentwall">★ Star on GitHub</a>
+        <a class="btn-ghost" href="https://github.com/agentwall/agentwall#readme">Read the docs →</a>
+      </div>
+
+      <div class="install-wrap">
+        <div class="install-label">Install</div>
+        <div class="install-box">
+          <div>
+            <div class="install-cmd">npx @agentwall/agentwall setup</div>
+            <div class="install-sub">~60 seconds · No account · No cloud</div>
+          </div>
+          <button class="copy-btn" type="button" onclick="copyInstall(this)">Copy</button>
+        </div>
+      </div>
+
+      <div class="clients-section">
+        <div class="clients-label">Works with</div>
+        <div class="clients-row">
+          <span class="client-pill">OpenClaw</span>
+          <span class="client-pill">Claude Desktop</span>
+          <span class="client-pill">Cursor</span>
+          <span class="client-pill">Windsurf</span>
+          <span class="client-pill">Claude Code</span>
+          <span class="client-pill">Any MCP client</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="demo-section">
+      <div class="demo-label">See it in action</div>
+      <div class="demo-wrap">
+        <div class="demo-frame">
+          <video class="demo" autoplay loop muted playsinline poster="demo.gif">
+            <source src="demo.mp4" type="video/mp4">
+            <img class="demo" src="demo.gif" alt="AgentWall blocking a read of .aws/credentials" width="1200" height="624" loading="lazy">
+          </video>
+        </div>
+      </div>
+    </section>
+
+    <hr class="section-divider">
+
+    <div class="why-section">
+      <div class="why-label">Why AgentWall</div>
+      <p class="why-text">
+        MCP clients ship safety prompts <strong>inside the runtime</strong>. A poisoned prompt, compromised tool,
+        or context compaction can bypass them. AgentWall enforces YAML policy at the proxy layer —
+        <strong>independent of the model and client</strong> — with an audit log neither can rewrite.
+      </p>
+    </div>
+
+    <div class="paper-section">
+      <div class="paper-eyebrow">Research</div>
+      <div class="paper-title">AgentWall: A Runtime Safety Layer for Local AI Agents</div>
+      <p class="paper-meta">
+        Ashwin Aravind · arXiv:2605.16265 · 92.9% policy enforcement accuracy, sub-ms overhead
+      </p>
+      <div class="paper-links">
+        <a class="paper-link" href="https://arxiv.org/abs/2605.16265">Read on arXiv →</a>
+        <a class="paper-link" href="https://github.com/agentwall/agentwall#citation">BibTeX on GitHub →</a>
+      </div>
+    </div>
+
+    <div class="blog-cta">
+      <div>
+        <div class="blog-cta-eyebrow">Security writeup</div>
+        <div class="blog-cta-title">Your AI agent can read every credential on your machine</div>
+      </div>
+      <a class="btn-red" href="https://dev.to/ashwinaravind/your-ai-agent-can-read-every-credential-on-your-machine-cd0" target="_blank" rel="noopener">Read →</a>
+    </div>
+
+    <div class="features-header">What AgentWall does</div>
+    <div class="feature-grid">
+      <div class="feature-card danger">
+        <span class="feature-icon">🛑</span>
+        <div class="feature-title">Blocks before execution</div>
+        <div class="feature-desc">Credentials, shell commands, database drops — intercepted before they run.</div>
+      </div>
+      <div class="feature-card">
+        <span class="feature-icon">📋</span>
+        <div class="feature-title">YAML policy engine</div>
+        <div class="feature-desc">deny, allow, or ask. Glob and SQL rules. Hot-reload, no restarts.</div>
+      </div>
+      <div class="feature-card">
+        <span class="feature-icon">🌐</span>
+        <div class="feature-title">Browser approval UI</div>
+        <div class="feature-desc">Approve tool calls at <code style="font-family:var(--mono);font-size:0.82rem;color:var(--green)">localhost:7823</code>.</div>
+      </div>
+      <div class="feature-card">
+        <span class="feature-icon">📒</span>
+        <div class="feature-title">Independent audit log</div>
+        <div class="feature-desc">Ground truth of every tool call, outside the agent's control.</div>
+      </div>
+      <div class="feature-card">
+        <span class="feature-icon">🔌</span>
+        <div class="feature-title">Native OpenClaw plugin</div>
+        <div class="feature-desc">Hooks <code style="font-family:var(--mono);font-size:0.82rem">before_tool_call</code> — no prompt patching.</div>
+      </div>
+      <div class="feature-card">
+        <span class="feature-icon">↩️</span>
+        <div class="feature-title">Fully reversible</div>
+        <div class="feature-desc"><code style="font-family:var(--mono);font-size:0.82rem;color:var(--green)">agentwall undo</code> restores all configs.</div>
+      </div>
+      <div class="feature-card">
+        <span class="feature-icon">🧪</span>
+        <div class="feature-title">Taint tracking</div>
+        <div class="feature-desc">Blocks credential read → outbound network exfiltration chains.</div>
+      </div>
+      <div class="feature-card accent">
+        <span class="feature-icon">📚</span>
+        <div class="feature-title">Policy library</div>
+        <div class="feature-desc">Community policies for gog, GitHub, 1Password, messaging, and more.</div>
+        <a class="feature-link" href="https://github.com/agentwall/agentwall-registry">Browse registry →</a>
+      </div>
+    </div>
+
+    <div class="proof-section">
+      <div class="proof-label">Listed on</div>
+      <div class="proof-row">
+        <a class="proof-badge" href="https://github.com/punkpeye/awesome-mcp-servers"><span class="check">✓</span> awesome-mcp-servers</a>
+        <a class="proof-badge" href="https://glama.ai"><span class="check">✓</span> Glama.ai</a>
+        <a class="proof-badge" href="https://github.com/agentwall/agentwall-registry"><span class="check">✓</span> Policy library</a>
+        <a class="proof-badge" href="https://arxiv.org/abs/2605.16265"><span class="check">✓</span> arXiv:2605.16265</a>
+        <a class="proof-badge" href="https://github.com/agentwall/agentwall/blob/main/LICENSE"><span class="check">✓</span> Apache 2.0</a>
+      </div>
+    </div>
+
+    <footer>
+      <span>© 2026 AgentWall</span>
+      <div class="footer-links">
+        <a href="https://github.com/agentwall/agentwall">GitHub</a>
+        <a href="https://arxiv.org/abs/2605.16265">Paper</a>
+        <a href="https://github.com/agentwall/agentwall-registry">Policies</a>
+        <a href="https://github.com/agentwall/agentwall/blob/main/LICENSE">Apache 2.0</a>
+      </div>
+    </footer>
+
+  </div>
+
+  <script>
+    function copyInstall(btn) {
+      navigator.clipboard.writeText('npx @agentwall/agentwall setup');
+      btn.textContent = 'Copied!';
+      setTimeout(() => btn.textContent = 'Copy', 2000);
+    }
+  </script>
+</body>
+</html>

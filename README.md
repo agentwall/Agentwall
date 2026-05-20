@@ -9,7 +9,10 @@
 
 **Your AI agent has root access. This blocks it.**
 
+[agentwall.dev](https://agentwall.dev) · [Paper (arXiv:2605.16265)](https://arxiv.org/abs/2605.16265) · [Security writeup](https://dev.to/ashwinaravind/your-ai-agent-can-read-every-credential-on-your-machine-cd0)
+
 [![npm version](https://img.shields.io/npm/v/@agentwall/agentwall.svg)](https://www.npmjs.com/package/@agentwall/agentwall)
+[![Website](https://img.shields.io/badge/website-agentwall.dev-141416?style=flat-square)](https://agentwall.dev)
 [![arXiv](https://img.shields.io/badge/arXiv-2605.16265-b31b1b.svg)](https://arxiv.org/abs/2605.16265)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg)](https://nodejs.org)
@@ -44,7 +47,7 @@ Your YAML policy is the final word. Not the client. Not the model. You.
 
 > 📖 **Writeup:** [Your AI agent can read every credential on your machine](https://dev.to/ashwinaravind/your-ai-agent-can-read-every-credential-on-your-machine-cd0)
 
-> 📄 **Paper:** [AgentWall: A Runtime Safety Layer for Local AI Agents](https://arxiv.org/abs/2605.16265) (arXiv:2605.16265) — design, threat model, policy model, and benchmark results (92.9% enforcement accuracy, sub-ms overhead)
+> 📄 **Paper:** [AgentWall: A Runtime Safety Layer for Local AI Agents](https://arxiv.org/abs/2605.16265) (arXiv:2605.16265) — threat model, policy model, and benchmarks (92.9% enforcement accuracy, sub-ms overhead). [BibTeX](#citation) below.
 
 ---
 
@@ -65,6 +68,7 @@ Your YAML policy is the final word. Not the client. Not the model. You.
 - [What AgentWall protects against](#what-agentwall-protects-against)
 - [What AgentWall does not protect against](#what-agentwall-does-not-protect-against)
 - [OWASP Agentic AI Top 10 coverage](#owasp-agentic-ai-top-10-coverage)
+- [Citation](#citation)
 
 ---
 
@@ -105,7 +109,7 @@ To verify protection is active:
 
 ```bash
 agentwall status
-# AgentWall v0.9.0
+# AgentWall v0.9.1
 # Protected: Claude Desktop (3 servers) · Cursor (1 server) · OpenClaw
 # Policy: ~/.agentwall/policy.yaml
 # Decisions today: 47 allowed · 0 blocked · 2 approved
@@ -561,6 +565,26 @@ To add a new MCP server to the policy registry, open a PR to [agentwall-registry
 | v0.7 | Client visibility | Clients tab, auto-detection, one-click protect |
 | v0.8 | Notifications | macOS notification, tab title, sound |
 | v0.9 | Taint tracking | Cross-call exfiltration detection, allowed_hosts, taint state in UI/CLI/audit |
+
+---
+
+## Citation
+
+If you use AgentWall in academic work, please cite:
+
+> Aravind, A. (2026). *AgentWall: A Runtime Safety Layer for Local AI Agents*. arXiv:2605.16265. https://arxiv.org/abs/2605.16265
+
+```bibtex
+@misc{aravind2026agentwall,
+  title         = {AgentWall: A Runtime Safety Layer for Local AI Agents},
+  author        = {Ashwin Aravind},
+  year          = {2026},
+  eprint        = {2605.16265},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.AI},
+  url           = {https://arxiv.org/abs/2605.16265}
+}
+```
 
 ---
 
