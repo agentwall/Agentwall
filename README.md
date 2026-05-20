@@ -10,6 +10,7 @@
 **Your AI agent has root access. This blocks it.**
 
 [![npm version](https://img.shields.io/npm/v/@agentwall/agentwall.svg)](https://www.npmjs.com/package/@agentwall/agentwall)
+[![arXiv](https://img.shields.io/badge/arXiv-2605.16265-b31b1b.svg)](https://arxiv.org/abs/2605.16265)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg)](https://nodejs.org)
 [![GitHub Stars](https://img.shields.io/github/stars/agentwall/agentwall?style=social)](https://github.com/agentwall/agentwall)
@@ -42,6 +43,8 @@ Your YAML policy is the final word. Not the client. Not the model. You.
 > ⚠️ **In February 2026**, a runaway OpenClaw agent sent 142 `gog gmail trash` calls and deleted a user's entire inbox. The safety prompts built into Claude Desktop and OpenClaw run inside the model's context window. Context compaction can wipe them out entirely. [AgentWall would have blocked it at call #1.](https://sfstandard.com/2026/02/25/openclaw-goes-rogue/)
 
 > 📖 **Writeup:** [Your AI agent can read every credential on your machine](https://dev.to/ashwinaravind/your-ai-agent-can-read-every-credential-on-your-machine-cd0)
+
+> 📄 **Paper:** [AgentWall: A Runtime Safety Layer for Local AI Agents](https://arxiv.org/abs/2605.16265) (arXiv:2605.16265) — design, threat model, policy model, and benchmark results (92.9% enforcement accuracy, sub-ms overhead)
 
 ---
 
